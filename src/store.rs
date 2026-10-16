@@ -118,6 +118,7 @@ impl CredentialStore for KeyringStore {
 pub struct CachedStore<S> {
     inner: S,
     cache: Mutex<HashMap<String, (Instant, String)>>,
+    ttl: Duration,
 }
 
 /// Long enough to cover the concurrent connections at startup.
@@ -125,9 +126,14 @@ const CACHE_TTL: Duration = Duration::from_secs(60);
 
 impl<S: CredentialStore> CachedStore<S> {
     pub fn new(inner: S) -> Self {
+        Self::with_ttl(inner, CACHE_TTL)
+    }
+
+    fn with_ttl(inner: S, ttl: Duration) -> Self {
         Self {
             inner,
             cache: Mutex::default(),
+            ttl,
         }
     }
 
@@ -144,14 +150,15 @@ impl<S: CredentialStore> CredentialStore for CachedStore<S> {
         validate_account(account)?;
         let mut cache = self.cache();
         if let Some((read_at, secret)) = cache.get(account)
-            && read_at.elapsed() < CACHE_TTL
+            && read_at.elapsed() < self.ttl
         {
             return Ok(Some(secret.clone()));
         }
         cache.remove(account);
-        // Lets a user count the OS prompts a start-up causes. Never the secret.
-        eprintln!("toolward: reading credential store account {account:?}");
-        let secret = self.inner.get(account)?;
+        // Routine reads stay silent. Log only a failure, and never the secret.
+        let secret = self.inner.get(account).inspect_err(|err| {
+            eprintln!("toolward: reading credential store account {account:?} failed: {err}");
+        })?;
         if let Some(secret) = &secret {
             cache.insert(account.to_owned(), (Instant::now(), secret.clone()));
         }
@@ -159,12 +166,15 @@ impl<S: CredentialStore> CredentialStore for CachedStore<S> {
     }
 
     fn set(&self, account: &str, secret: &str) -> Result<(), StoreError> {
-        self.cache().remove(account);
+        // Hold the lock across the write so a concurrent read cannot cache the old value.
+        let mut cache = self.cache();
+        cache.remove(account);
         self.inner.set(account, secret)
     }
 
     fn delete(&self, account: &str) -> Result<bool, StoreError> {
-        self.cache().remove(account);
+        let mut cache = self.cache();
+        cache.remove(account);
         self.inner.delete(account)
     }
 }
@@ -309,6 +319,65 @@ mod tests {
         // Stored behind the cache's back, as `toolward secret set` would.
         store.inner.set("late", "now").unwrap();
         assert_eq!(store.get("late").unwrap().as_deref(), Some("now"));
+    }
+
+    #[test]
+    fn cached_store_rereads_once_after_expiry_then_caches_again() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let ttl = std::time::Duration::from_millis(50);
+        // Deterministic bounds: a zero TTL never caches, a huge one always does.
+        let never = CachedStore::with_ttl(Probe::default(), std::time::Duration::ZERO);
+        never.get("a").unwrap();
+        never.get("a").unwrap();
+        assert_eq!(never.inner.reads.load(SeqCst), 2);
+        let always = CachedStore::with_ttl(Probe::default(), std::time::Duration::from_secs(3600));
+        always.get("a").unwrap();
+        always.get("a").unwrap();
+        assert_eq!(always.inner.reads.load(SeqCst), 1);
+        // Genuine expiry check.
+        let store = CachedStore::with_ttl(Probe::default(), ttl);
+        store.get("a").unwrap();
+        assert_eq!(store.inner.reads.load(SeqCst), 1);
+        std::thread::sleep(ttl * 3);
+        // First read after expiry hits the inner store once...
+        assert_eq!(store.get("a").unwrap().as_deref(), Some("s3cret"));
+        assert_eq!(store.inner.reads.load(SeqCst), 2);
+        // ...and later reads are served from the cache again.
+        for _ in 0..5 {
+            assert_eq!(store.get("a").unwrap().as_deref(), Some("s3cret"));
+        }
+        assert_eq!(store.inner.reads.load(SeqCst), 2);
+    }
+
+    #[derive(Default)]
+    struct Failing {
+        reads: std::sync::atomic::AtomicUsize,
+    }
+
+    impl CredentialStore for Failing {
+        fn get(&self, _: &str) -> Result<Option<String>, StoreError> {
+            self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err(StoreError::Backend("boom".into()))
+        }
+
+        fn set(&self, _: &str, _: &str) -> Result<(), StoreError> {
+            Ok(())
+        }
+
+        fn delete(&self, _: &str) -> Result<bool, StoreError> {
+            Ok(false)
+        }
+    }
+
+    #[test]
+    fn cached_store_does_not_cache_an_inner_failure() {
+        let store = CachedStore::new(Failing::default());
+        assert!(store.get("a").is_err());
+        assert!(store.get("a").is_err());
+        assert_eq!(
+            store.inner.reads.load(std::sync::atomic::Ordering::SeqCst),
+            2
+        );
     }
 
     #[test]
