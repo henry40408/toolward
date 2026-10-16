@@ -29,6 +29,8 @@ pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 const RETRY_AFTER: Duration = Duration::from_secs(30);
 /// Upper bound for spawning a server and completing the MCP handshake.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(60);
+/// How long a `list` request may take before the upstream is skipped.
+const LIST_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Prints a diagnostic to stderr. Stdout belongs to the MCP protocol.
 pub fn log(message: impl AsRef<str>) {
@@ -321,6 +323,7 @@ pub struct Upstream {
     connector: Box<dyn Connect>,
     state: Mutex<State>,
     shared: Arc<Shared>,
+    list_timeout: Duration,
 }
 
 impl Upstream {
@@ -329,6 +332,7 @@ impl Upstream {
             name: name.into(),
             connector,
             state: Mutex::new(State::Idle),
+            list_timeout: LIST_TIMEOUT,
             shared: Arc::new(Shared {
                 secrets: StdMutex::new(Vec::new()),
                 hub: OnceLock::new(),
@@ -339,6 +343,27 @@ impl Upstream {
 
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// Replaces the time a `list` request may take. Tests use a short one.
+    pub fn with_list_timeout(mut self, timeout: Duration) -> Self {
+        self.list_timeout = timeout;
+        self
+    }
+
+    /// Runs a `list` request, giving up after the list timeout. Errors are
+    /// redacted, so they are safe to show.
+    pub async fn bounded<T, E: std::fmt::Display>(
+        &self,
+        request: impl Future<Output = Result<T, E>>,
+    ) -> Result<T, String> {
+        match tokio::time::timeout(self.list_timeout, request).await {
+            Ok(result) => result.map_err(|err| self.redact(&err.to_string())),
+            Err(_) => Err(format!(
+                "no response to a list request within {}s",
+                self.list_timeout.as_secs_f32()
+            )),
+        }
     }
 
     /// Masks the secrets of this upstream in `text`.
@@ -355,10 +380,7 @@ impl Upstream {
     /// `<server>__` prefix) and remembers how to map them back.
     pub async fn tools(&self) -> Result<Vec<Tool>, String> {
         let peer = self.peer().await?;
-        let mut tools = peer
-            .list_all_tools()
-            .await
-            .map_err(|err| self.redact(&err.to_string()))?;
+        let mut tools = self.bounded(peer.list_all_tools()).await?;
         let originals: Vec<String> = tools.iter().map(|t| t.name.to_string()).collect();
         let assignment = names::assign(&self.name, &originals);
         let by_original: HashMap<&str, &str> = assignment

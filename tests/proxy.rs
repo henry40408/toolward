@@ -104,7 +104,13 @@ async fn lists_prefixed_tools_and_forwards_calls() {
 
     assert_eq!(
         harness.tool_names().await,
-        ["fake__die", "fake__echo", "fake__env", "fake__fail"]
+        [
+            "fake__die",
+            "fake__echo",
+            "fake__env",
+            "fake__fail",
+            "fake__hang"
+        ]
     );
     let result = harness
         .call("fake__echo", json!({"text": "hi"}))
@@ -167,7 +173,13 @@ async fn failing_upstreams_are_skipped() {
 
     assert_eq!(
         harness.tool_names().await,
-        ["fake__die", "fake__echo", "fake__env", "fake__fail"]
+        [
+            "fake__die",
+            "fake__echo",
+            "fake__env",
+            "fake__fail",
+            "fake__hang"
+        ]
     );
 
     let err = harness
@@ -182,6 +194,60 @@ async fn failing_upstreams_are_skipped() {
         .unwrap_err()
         .to_string();
     assert!(err.contains("absent"), "{err}");
+    harness.finish().await;
+}
+
+#[tokio::test]
+async fn a_slow_listing_is_skipped() {
+    let store = store_with(&[]);
+    let slow = stdio(
+        "slow",
+        &fake_upstream_path(),
+        &[("FAKE_LIST_DELAY_MS", "30000")],
+        &store,
+    )
+    .with_list_timeout(std::time::Duration::from_millis(1500));
+    let fast = stdio("fast", &fake_upstream_path(), &[], &store);
+    let harness = start(vec![slow, fast]).await;
+
+    let started = std::time::Instant::now();
+    let names = harness.tool_names().await;
+    assert!(started.elapsed() < std::time::Duration::from_secs(10));
+    assert!(names.iter().all(|name| name.starts_with("fast__")));
+    assert!(!names.is_empty());
+    harness.finish().await;
+}
+
+#[tokio::test]
+async fn cancelling_a_call_cancels_it_upstream() {
+    let store = store_with(&[]);
+    let harness = start(vec![stdio("fake", &fake_upstream_path(), &[], &store)]).await;
+    let dir = tempfile::tempdir().unwrap();
+    let marker = dir.path().join("marker");
+
+    let params = CallToolRequestParams::new("fake__hang")
+        .with_arguments(json!({"marker": marker}).as_object().unwrap().clone());
+    let request =
+        rmcp::model::ClientRequest::CallToolRequest(rmcp::model::CallToolRequest::new(params));
+    let handle = harness
+        .client
+        .peer()
+        .send_cancellable_request(request, rmcp::service::PeerRequestOptions::no_options())
+        .await
+        .unwrap();
+    // Let the call reach the upstream before cancelling it.
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    handle.cancel(Some("test".into())).await.unwrap();
+
+    let mut cancelled = false;
+    for _ in 0..50 {
+        if marker.exists() {
+            cancelled = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert!(cancelled, "the upstream never saw the cancellation");
     harness.finish().await;
 }
 

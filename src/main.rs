@@ -9,7 +9,7 @@ use rmcp::ServiceExt;
 use toolward::cli::{self, Cli, Command, SecretCommand};
 use toolward::config::Config;
 use toolward::proxy::Proxy;
-use toolward::store::{CredentialStore, KeyringStore, validate_account};
+use toolward::store::{CachedStore, CredentialStore, KeyringStore, validate_account};
 
 fn main() -> ExitCode {
     match run(Cli::parse()) {
@@ -25,7 +25,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
     // `serve` must not hold stdout: it carries the MCP protocol.
     if matches!(cli.command, Command::Serve) {
         let config = Config::load(&cli.config_path()?)?;
-        let store: Arc<dyn CredentialStore> = Arc::new(KeyringStore::native()?);
+        let store: Arc<dyn CredentialStore> = Arc::new(CachedStore::new(KeyringStore::native()?));
         return serve(&config, &store);
     }
 
@@ -43,7 +43,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
         }
         Command::Check { tools } => {
             let config = Config::load(&cli.config_path()?)?;
-            let store = KeyringStore::native()?;
+            let store = CachedStore::new(KeyringStore::native()?);
             let mut ok = cli::check(&config, &store, &mut out)?;
             if *tools {
                 let store: Arc<dyn CredentialStore> = Arc::new(store);

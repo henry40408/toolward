@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 /// Keychain service under which every toolward secret is stored.
 pub const SERVICE: &str = "toolward";
@@ -95,6 +96,67 @@ impl CredentialStore for KeyringStore {
     }
 }
 
+/// Reads each account from the inner store at most once and one at a time.
+///
+/// Upstreams connect concurrently and each `${keychain:...}` reference would
+/// otherwise open its own OS authorization prompt. Holding the lock across the
+/// read queues the prompts, and the cache stops a repeated account from
+/// prompting again. An entry expires after [`CACHE_TTL`], so a rotated secret
+/// is picked up on a later reconnect. A missing secret is never cached.
+pub struct CachedStore<S> {
+    inner: S,
+    cache: Mutex<HashMap<String, (Instant, String)>>,
+}
+
+/// Long enough to cover the concurrent connections at startup.
+const CACHE_TTL: Duration = Duration::from_secs(60);
+
+impl<S: CredentialStore> CachedStore<S> {
+    pub fn new(inner: S) -> Self {
+        Self {
+            inner,
+            cache: Mutex::default(),
+        }
+    }
+
+    /// A panic in the backend must not make every later read panic too.
+    fn cache(&self) -> std::sync::MutexGuard<'_, HashMap<String, (Instant, String)>> {
+        self.cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+impl<S: CredentialStore> CredentialStore for CachedStore<S> {
+    fn get(&self, account: &str) -> Result<Option<String>, StoreError> {
+        validate_account(account)?;
+        let mut cache = self.cache();
+        if let Some((read_at, secret)) = cache.get(account)
+            && read_at.elapsed() < CACHE_TTL
+        {
+            return Ok(Some(secret.clone()));
+        }
+        cache.remove(account);
+        // Lets a user count the OS prompts a start-up causes. Never the secret.
+        eprintln!("toolward: reading credential store account {account:?}");
+        let secret = self.inner.get(account)?;
+        if let Some(secret) = &secret {
+            cache.insert(account.to_owned(), (Instant::now(), secret.clone()));
+        }
+        Ok(secret)
+    }
+
+    fn set(&self, account: &str, secret: &str) -> Result<(), StoreError> {
+        self.cache().remove(account);
+        self.inner.set(account, secret)
+    }
+
+    fn delete(&self, account: &str) -> Result<bool, StoreError> {
+        self.cache().remove(account);
+        self.inner.delete(account)
+    }
+}
+
 /// In-memory store for tests.
 #[derive(Default)]
 pub struct MemoryStore {
@@ -159,6 +221,82 @@ mod tests {
         assert!(store.delete("a").unwrap());
         assert!(!store.delete("a").unwrap());
         assert_eq!(store.get("a").unwrap(), None);
+    }
+
+    /// Counts reads and notes whether two reads overlapped.
+    #[derive(Default)]
+    struct Probe {
+        reads: std::sync::atomic::AtomicUsize,
+        active: std::sync::atomic::AtomicUsize,
+        overlapped: std::sync::atomic::AtomicBool,
+    }
+
+    impl CredentialStore for Probe {
+        fn get(&self, _account: &str) -> Result<Option<String>, StoreError> {
+            use std::sync::atomic::Ordering::SeqCst;
+            self.reads.fetch_add(1, SeqCst);
+            if self.active.fetch_add(1, SeqCst) > 0 {
+                self.overlapped.store(true, SeqCst);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(30));
+            self.active.fetch_sub(1, SeqCst);
+            Ok(Some("s3cret".into()))
+        }
+
+        fn set(&self, _: &str, _: &str) -> Result<(), StoreError> {
+            Ok(())
+        }
+
+        fn delete(&self, _: &str) -> Result<bool, StoreError> {
+            Ok(true)
+        }
+    }
+
+    #[test]
+    fn cached_store_reads_once_and_one_at_a_time() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let store = std::sync::Arc::new(CachedStore::new(Probe::default()));
+        let threads: Vec<_> = (0..6)
+            .map(|i| {
+                let store = std::sync::Arc::clone(&store);
+                // Two distinct accounts, each asked for three times.
+                std::thread::spawn(move || store.get(&format!("acct{}", i % 2)).unwrap())
+            })
+            .collect();
+        for thread in threads {
+            assert_eq!(thread.join().unwrap().as_deref(), Some("s3cret"));
+        }
+        assert_eq!(store.inner.reads.load(SeqCst), 2);
+        assert!(!store.inner.overlapped.load(SeqCst));
+    }
+
+    #[test]
+    fn cached_store_forgets_an_account_after_set() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let store = CachedStore::new(Probe::default());
+        store.get("a").unwrap();
+        store.set("a", "new").unwrap();
+        store.get("a").unwrap();
+        assert_eq!(store.inner.reads.load(SeqCst), 2);
+    }
+
+    #[test]
+    fn cached_store_forgets_an_account_after_delete() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let store = CachedStore::new(Probe::default());
+        store.get("a").unwrap();
+        store.delete("a").unwrap();
+        store.get("a").unwrap();
+        assert_eq!(store.inner.reads.load(SeqCst), 2);
+    }
+
+    #[test]
+    fn cached_store_does_not_remember_a_missing_secret() {
+        let store = CachedStore::new(MemoryStore::new());
+        assert_eq!(store.get("late").unwrap(), None);
+        // Stored behind the cache's back, as `toolward secret set` would.
+        store.inner.set("late", "now").unwrap();
+        assert_eq!(store.get("late").unwrap().as_deref(), Some("now"));
     }
 
     #[test]

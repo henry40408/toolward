@@ -7,12 +7,16 @@ use std::sync::Arc;
 use rmcp::ErrorData as McpError;
 use rmcp::handler::server::ServerHandler;
 use rmcp::model::{
-    CallToolRequestParams, CallToolResponse, GetPromptRequestParams, GetPromptResponse,
-    Implementation, ListPromptsResult, ListResourcesResult, ListToolsResult,
-    PaginatedRequestParams, ReadResourceRequestParams, ReadResourceResponse, ResourceContents,
-    ResultType, ServerCapabilities, ServerConfig,
+    CallToolRequest, CallToolRequestParams, CallToolResponse, ClientRequest,
+    GetPromptRequestParams, GetPromptResponse, Implementation, ListPromptsResult,
+    ListResourcesResult, ListToolsResult, PaginatedRequestParams, ReadResourceRequestParams,
+    ReadResourceResponse, ResourceContents, ResultType, ServerCapabilities, ServerConfig,
+    ServerResult,
 };
-use rmcp::service::{NotificationContext, RequestContext, RoleServer, ServiceError};
+use rmcp::service::{
+    NotificationContext, Peer, PeerRequestOptions, RequestContext, RoleClient, RoleServer,
+    ServiceError,
+};
 use tokio::task::JoinSet;
 
 use crate::config::{Config, Transport};
@@ -116,6 +120,34 @@ fn service_error(upstream: &Upstream, err: ServiceError) -> McpError {
             upstream.redact(&format!("upstream request failed: {other}")),
             None,
         ),
+    }
+}
+
+/// Forwards a tool call and, when the downstream request is cancelled, sends
+/// `notifications/cancelled` upstream so a long-running tool stops too.
+async fn call_tool_cancellable(
+    peer: &Peer<RoleClient>,
+    params: CallToolRequestParams,
+    cancelled: impl Future<Output = ()>,
+) -> Result<CallToolResponse, ServiceError> {
+    let mut handle = peer
+        .send_cancellable_request(
+            ClientRequest::CallToolRequest(CallToolRequest::new(params)),
+            PeerRequestOptions::no_options(),
+        )
+        .await?;
+    let outcome = tokio::select! {
+        outcome = &mut handle.rx => outcome,
+        () = cancelled => {
+            let _ = handle.cancel(Some("cancelled by the client".into())).await;
+            return Err(ServiceError::Cancelled { reason: None });
+        }
+    };
+    match outcome.map_err(|_| ServiceError::TransportClosed)?? {
+        ServerResult::CallToolResult(result) => Ok(CallToolResponse::Complete(result)),
+        ServerResult::InputRequiredResult(result) => Ok(CallToolResponse::InputRequired(result)),
+        ServerResult::CreateTaskResult(result) => Ok(CallToolResponse::Task(result)),
+        _ => Err(ServiceError::UnexpectedResponse),
     }
 }
 
@@ -235,7 +267,7 @@ impl ServerHandler for Proxy {
     async fn call_tool(
         &self,
         mut request: CallToolRequestParams,
-        _context: RequestContext<RoleServer>,
+        context: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, McpError> {
         let name = request.name.to_string();
         let unknown = || McpError::invalid_params(format!("unknown tool {name:?}"), None);
@@ -251,8 +283,7 @@ impl ServerHandler for Proxy {
             .await
             .map_err(|reason| unavailable(server, reason))?;
         request.name = original.into();
-        let response = peer
-            .call_tool_once(request)
+        let response = call_tool_cancellable(&peer, request, context.ct.cancelled())
             .await
             .map_err(|err| service_error(upstream, err))?;
         // Upstreams on older protocol revisions omit `resultType`, which the
@@ -277,10 +308,7 @@ impl ServerHandler for Proxy {
             tasks.spawn(async move {
                 let resources = match upstream.peer().await {
                     Ok(peer) if !supports(&peer, Capability::Resources) => Ok(Vec::new()),
-                    Ok(peer) => peer
-                        .list_all_resources()
-                        .await
-                        .map_err(|err| upstream.redact(&err.to_string())),
+                    Ok(peer) => upstream.bounded(peer.list_all_resources()).await,
                     Err(reason) => Err(reason),
                 };
                 (upstream.name().to_owned(), resources)
@@ -346,10 +374,7 @@ impl ServerHandler for Proxy {
             tasks.spawn(async move {
                 let prompts = match upstream.peer().await {
                     Ok(peer) if !supports(&peer, Capability::Prompts) => Ok(Vec::new()),
-                    Ok(peer) => peer
-                        .list_all_prompts()
-                        .await
-                        .map_err(|err| upstream.redact(&err.to_string())),
+                    Ok(peer) => upstream.bounded(peer.list_all_prompts()).await,
                     Err(reason) => Err(reason),
                 };
                 (upstream.name().to_owned(), prompts)

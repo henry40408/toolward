@@ -1,7 +1,8 @@
 //! A tiny stdio MCP server used by the integration tests.
 //!
 //! Tools: `echo` returns its `text`, `env` returns the value of the environment
-//! variable `name`, `fail` returns a tool-level error, `die` exits the process.
+//! variable `name`, `fail` returns a tool-level error, `die` exits the process, `hang`
+//! waits for cancellation and then writes the file named by `marker`.
 
 use rmcp::handler::server::ServerHandler;
 use rmcp::model::{
@@ -34,12 +35,20 @@ impl ServerHandler for Fake {
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
+        // `FAKE_LIST_DELAY_MS` makes the listing slow.
+        if let Some(ms) = std::env::var("FAKE_LIST_DELAY_MS")
+            .ok()
+            .and_then(|ms| ms.parse().ok())
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+        }
         Ok(ListToolsResult {
             tools: vec![
                 Tool::new("echo", "Echo the text", schema("text")),
                 Tool::new("env", "Read an environment variable", schema("name")),
                 Tool::new("fail", "Always fails", schema("unused")),
                 Tool::new("die", "Exits the process", schema("unused")),
+                Tool::new("hang", "Waits to be cancelled", schema("marker")),
             ],
             ..Default::default()
         })
@@ -48,7 +57,7 @@ impl ServerHandler for Fake {
     async fn call_tool(
         &self,
         request: CallToolRequestParams,
-        _context: RequestContext<RoleServer>,
+        context: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, McpError> {
         let argument = |key: &str| {
             request
@@ -70,6 +79,12 @@ impl ServerHandler for Fake {
             }
             "fail" => CallToolResult::error(vec![ContentBlock::text("boom")]),
             "die" => std::process::exit(0),
+            "hang" => {
+                // Leaves a marker file once the request is cancelled.
+                context.ct.cancelled().await;
+                std::fs::write(argument("marker"), "cancelled").expect("write marker");
+                CallToolResult::success(vec![ContentBlock::text("cancelled")])
+            }
             other => {
                 return Err(McpError::invalid_params(format!("no tool {other:?}"), None));
             }
