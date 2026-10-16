@@ -258,7 +258,13 @@ impl ServerHandler for Proxy {
         let mut tasks = JoinSet::new();
         for upstream in self.upstreams.values() {
             let upstream = Arc::clone(upstream);
-            tasks.spawn(async move { (upstream.name().to_owned(), upstream.tools().await) });
+            tasks.spawn(async move {
+                let tools = upstream
+                    .tools()
+                    .await
+                    .and_then(|list| upstream.redact_result(list));
+                (upstream.name().to_owned(), tools)
+            });
         }
         let mut tools = Vec::new();
         while let Some(joined) = tasks.join_next().await {
@@ -332,7 +338,10 @@ impl ServerHandler for Proxy {
             tasks.spawn(async move {
                 let resources = match upstream.peer().await {
                     Ok(peer) if !supports(&peer, Capability::Resources) => Ok(Vec::new()),
-                    Ok(peer) => upstream.bounded(peer.list_all_resources()).await,
+                    Ok(peer) => upstream
+                        .bounded(peer.list_all_resources())
+                        .await
+                        .and_then(|list| upstream.redact_result(list)),
                     Err(reason) => Err(reason),
                 };
                 (upstream.name().to_owned(), resources)
@@ -399,7 +408,10 @@ impl ServerHandler for Proxy {
             tasks.spawn(async move {
                 let prompts = match upstream.peer().await {
                     Ok(peer) if !supports(&peer, Capability::Prompts) => Ok(Vec::new()),
-                    Ok(peer) => upstream.bounded(peer.list_all_prompts()).await,
+                    Ok(peer) => upstream
+                        .bounded(peer.list_all_prompts())
+                        .await
+                        .and_then(|list| upstream.redact_result(list)),
                     Err(reason) => Err(reason),
                 };
                 (upstream.name().to_owned(), prompts)

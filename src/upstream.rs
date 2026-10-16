@@ -194,14 +194,49 @@ pub fn build_command(
 
 /// Replaces every secret value in `text` with `[REDACTED]`.
 pub fn redact(text: &str, secrets: &[String]) -> String {
-    let mut ordered: Vec<&String> = secrets.iter().filter(|s| !s.is_empty()).collect();
-    // Longest first, so a secret that contains another one is fully masked.
-    ordered.sort_by_key(|s| std::cmp::Reverse(s.len()));
-    let mut out = text.to_owned();
-    for secret in ordered {
-        out = out.replace(secret.as_str(), "[REDACTED]");
+    let patterns: Vec<&str> = secrets
+        .iter()
+        .map(String::as_str)
+        .filter(|s| !s.is_empty())
+        .collect();
+    mask_text(text, &patterns).unwrap_or_else(|| text.to_owned())
+}
+
+/// Replaces every match of every pattern with `[REDACTED]`, or returns `None`
+/// when nothing matches. Matches that overlap or touch become one mask, so no
+/// part of a secret that overlaps another one is left behind.
+fn mask_text<P: AsRef<str>>(text: &str, patterns: &[P]) -> Option<String> {
+    let mut spans: Vec<(usize, usize)> = Vec::new();
+    for pattern in patterns {
+        let pattern = pattern.as_ref();
+        if !pattern.is_empty() {
+            spans.extend(
+                text.match_indices(pattern)
+                    .map(|(start, found)| (start, start + found.len())),
+            );
+        }
     }
-    out
+    if spans.is_empty() {
+        return None;
+    }
+    spans.sort_unstable();
+    let mut out = String::with_capacity(text.len());
+    let mut copied = 0;
+    let mut spans = spans.into_iter().peekable();
+    while let Some((start, mut end)) = spans.next() {
+        while let Some(&(next_start, next_end)) = spans.peek() {
+            if next_start > end {
+                break;
+            }
+            end = end.max(next_end);
+            spans.next();
+        }
+        out.push_str(&text[copied..start]);
+        out.push_str("[REDACTED]");
+        copied = end;
+    }
+    out.push_str(&text[copied..]);
+    Some(out)
 }
 
 /// Secrets shorter than this are not masked in results: they would match
@@ -234,6 +269,11 @@ fn result_patterns(secrets: &[String]) -> Vec<String> {
             patterns.push(inner.to_owned());
             // Some encoders (PHP) also escape the slash.
             patterns.push(inner.replace('/', "\\/"));
+            // JSON inside a JSON string (a tool that returns a JSON document).
+            let twice = serde_json::to_string(inner).unwrap_or_default();
+            if let Some(inner) = twice.strip_prefix('"').and_then(|j| j.strip_suffix('"')) {
+                patterns.push(inner.to_owned());
+            }
         }
         for hex in [true, false] {
             let mut encoded = String::new();
@@ -293,33 +333,131 @@ fn base64_forms(secret: &[u8]) -> Vec<String> {
     forms
 }
 
-fn mask_strings(value: &mut serde_json::Value, patterns: &[String]) {
+/// Keys of the MCP protocol itself. Inside a protocol position their names are
+/// never masked, so a secret that is an ordinary word cannot rename a field.
+const PROTOCOL_KEYS: &[&str] = &[
+    "type",
+    "text",
+    "data",
+    "blob",
+    "mimeType",
+    "uri",
+    "name",
+    "title",
+    "description",
+    "role",
+    "content",
+    "contents",
+    "resource",
+    "annotations",
+    "audience",
+    "icons",
+    "theme",
+    "_meta",
+    "structuredContent",
+    "isError",
+    "resultType",
+    "inputSchema",
+    "outputSchema",
+    "arguments",
+    "messages",
+    "tools",
+    "resources",
+    "prompts",
+    "nextCursor",
+    "code",
+    "message",
+];
+
+/// Keys through which the result stays a protocol position. Anything else
+/// (`structuredContent`, `_meta`, error `data`, schemas, call arguments) holds
+/// free-form data written by the upstream, and is masked without exceptions.
+const PROTOCOL_DESCEND: &[&str] = &[
+    "tools",
+    "resources",
+    "prompts",
+    "content",
+    "contents",
+    "messages",
+    "resource",
+    "annotations",
+    "icons",
+];
+
+/// Whether `text` under `key` is a protocol word or identifier the agent must
+/// send back or the client must parse unchanged. Masking it would break the
+/// next call, so a value of the right shape is left alone.
+fn is_protocol_value(key: &str, text: &str) -> bool {
+    let word = |extra: &[char]| {
+        !text.is_empty()
+            && text.len() <= 128
+            && text
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || extra.contains(&c))
+    };
+    match key {
+        "type" | "role" | "resultType" | "theme" | "audience" => word(&[]),
+        "name" => word(&['.', ':', '/']),
+        "mimeType" => word(&['.', '+', '/']) && text.matches('/').count() == 1,
+        _ => false,
+    }
+}
+
+/// Masks the patterns in every string of `value`. `protocol` is true while
+/// `value` is at a position of the MCP protocol. Returns whether anything changed.
+fn mask_strings<P: AsRef<str>>(
+    value: &mut serde_json::Value,
+    patterns: &[P],
+    protocol: bool,
+) -> bool {
+    let mut changed = false;
     match value {
         serde_json::Value::String(text) => {
-            for pattern in patterns {
-                if text.contains(pattern.as_str()) {
-                    *text = text.replace(pattern.as_str(), "[REDACTED]");
-                }
+            if let Some(masked) = mask_text(text, patterns) {
+                *text = masked;
+                changed = true;
             }
         }
         serde_json::Value::Array(items) => {
-            items
-                .iter_mut()
-                .for_each(|item| mask_strings(item, patterns));
+            for item in items {
+                changed |= mask_strings(item, patterns, protocol);
+            }
         }
         serde_json::Value::Object(map) => {
             let entries = std::mem::take(map);
             for (mut key, mut item) in entries {
-                for pattern in patterns {
-                    if key.contains(pattern.as_str()) {
-                        key = key.replace(pattern.as_str(), "[REDACTED]");
-                    }
+                if !(protocol && PROTOCOL_KEYS.contains(&key.as_str()))
+                    && let Some(masked) = mask_text(&key, patterns)
+                {
+                    key = masked;
+                    changed = true;
                 }
-                mask_strings(&mut item, patterns);
+                let child = protocol
+                    && (PROTOCOL_DESCEND.contains(&key.as_str())
+                        || (key == "arguments" && item.is_array()));
+                let keep = protocol && exempt_value(&key, &item);
+                if !keep {
+                    changed |= mask_strings(&mut item, patterns, child);
+                }
                 map.insert(key, item);
             }
         }
         _ => {}
+    }
+    changed
+}
+
+/// A protocol value (or a list of them, such as `audience`) to leave as it is.
+fn exempt_value(key: &str, item: &serde_json::Value) -> bool {
+    match item {
+        serde_json::Value::String(text) => is_protocol_value(key, text),
+        serde_json::Value::Array(items) => {
+            key == "audience"
+                && items
+                    .iter()
+                    .all(|i| i.as_str().is_some_and(|t| is_protocol_value(key, t)))
+        }
+        _ => false,
     }
 }
 
@@ -336,7 +474,11 @@ where
     }
     let mut json = serde_json::to_value(&value)
         .map_err(|_| "cannot inspect the upstream result for secrets".to_owned())?;
-    mask_strings(&mut json, &patterns);
+    // Untouched values go through as they came: a round trip through JSON
+    // can reorder keys.
+    if !mask_strings(&mut json, &patterns, true) {
+        return Ok(value);
+    }
     serde_json::from_value(json)
         .map_err(|_| "cannot inspect the upstream result for secrets".to_owned())
 }
@@ -719,6 +861,78 @@ mod tests {
         assert_eq!(out["b"][1], "q=[REDACTED]");
         // Too short to mask without hitting ordinary text.
         assert_eq!(out["b"][2], "abc stays");
+    }
+
+    #[test]
+    fn overlapping_secrets_leave_no_fragment() {
+        let secrets = vec!["abcdef".to_owned(), "defghi".to_owned()];
+        assert_eq!(redact("x abcdefghi y", &secrets), "x [REDACTED] y");
+        let out = redact_value(serde_json::json!(["abcdefghi"]), &secrets).unwrap();
+        assert_eq!(out[0], "[REDACTED]");
+    }
+
+    #[test]
+    fn a_secret_that_is_a_common_word_cannot_break_the_protocol() {
+        use serde_json::json;
+        let secrets = vec!["text".to_owned()];
+        let value = json!({"type": "text", "text": "a text", "mimeType": "text/plain",
+                           "text/odd": 1});
+        let out = redact_value(value, &secrets).unwrap();
+        assert_eq!(out["type"], "text");
+        assert_eq!(out["mimeType"], "text/plain");
+        assert_eq!(out["text"], "a [REDACTED]");
+        assert_eq!(out["[REDACTED]/odd"], 1);
+    }
+
+    #[test]
+    fn free_form_data_is_masked_even_under_protocol_names() {
+        use serde_json::json;
+        let secrets = vec!["ghp_abcdef".to_owned()];
+        let value = json!({
+            "content": [{"type": "text", "text": "x"}],
+            "structuredContent": {"credentials": [
+                {"name": "ghp_abcdef", "type": "Bearer ghp_abcdef", "mimeType": "a/b; t=ghp_abcdef"}]},
+            "_meta": {"name": "ghp_abcdef"},
+        });
+        let out = redact_value(value, &secrets).unwrap().to_string();
+        assert!(!out.contains("ghp_abcdef"), "{out}");
+    }
+
+    #[test]
+    fn enum_values_survive_a_word_secret() {
+        let secrets = vec!["user".to_owned(), "dark".to_owned()];
+        let value = serde_json::json!({"content": [{"type": "text", "text": "hi user",
+            "annotations": {"audience": ["user", "assistant"]}}]});
+        let out = redact_value(value, &secrets).unwrap();
+        assert_eq!(out["content"][0]["annotations"]["audience"][0], "user");
+        assert_eq!(out["content"][0]["text"], "hi [REDACTED]");
+    }
+
+    #[test]
+    fn overlapping_multibyte_secrets_do_not_panic() {
+        let secrets = vec!["日本語パス".to_owned(), "語パスワード".to_owned()];
+        assert_eq!(redact("a日本語パスワードb", &secrets), "a[REDACTED]b");
+    }
+
+    #[test]
+    fn json_inside_json_is_masked() {
+        let secrets = vec!["pa\"ss".to_owned()];
+        let inner = serde_json::json!({"k": "pa\"ss"}).to_string();
+        let outer = serde_json::json!({"doc": inner}).to_string();
+        let value = serde_json::json!({"deep": outer});
+        let out = redact_value(value, &secrets).unwrap().to_string();
+        assert!(
+            !out.contains("pa\\\\\\\"ss") && !out.contains("pa"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn untouched_values_keep_their_key_order() {
+        let value: serde_json::Value =
+            serde_json::from_str(r#"{"z": 1, "a": 2, "m": "plain"}"#).unwrap();
+        let out = redact_value(value.clone(), &["secret-value".to_owned()]).unwrap();
+        assert_eq!(out, value);
     }
 
     #[test]
