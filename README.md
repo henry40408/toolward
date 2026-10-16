@@ -135,6 +135,18 @@ The toolward config holds only references, but it also lists your accounts. Keep
 - A server that fails to start is left out of `tools/list`; `toolward check --tools` shows why.
 - Several `serve` processes can refresh the same OAuth token at once.
 
+## Development
+
+```sh
+cargo fmt
+cargo clippy --all-targets --locked -- -D warnings
+cargo build --examples            # the integration tests start examples/fake_upstream
+cargo nextest run --locked        # tests; cargo test --doc runs the doctests
+cargo deny check                  # advisories and licenses
+```
+
+The Rust version is pinned in `rust-toolchain.toml`. See [ARCHITECTURE.md](ARCHITECTURE.md) for how the code is organized.
+
 ## License
 
 MIT
