@@ -5,6 +5,8 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 
 use crate::config::{self, Config};
+use crate::names::SEPARATOR;
+use crate::proxy::Proxy;
 use crate::store::{CredentialStore, validate_account};
 
 #[derive(Debug, Parser)]
@@ -24,7 +26,11 @@ pub enum Command {
     #[command(subcommand)]
     Secret(SecretCommand),
     /// Validate the config and report which referenced secrets are missing
-    Check,
+    Check {
+        /// Also connect to every server and list the tool names the agent will see
+        #[arg(long)]
+        tools: bool,
+    },
     /// Run the MCP proxy on stdio (this is what an agent's mcp.json should launch)
     Serve,
 }
@@ -94,6 +100,34 @@ pub fn check(config: &Config, store: &dyn CredentialStore, out: &mut dyn Write) 
         }
     }
     Ok(all_present)
+}
+
+/// Connects to every upstream and prints the tool names the agent will see,
+/// marking those that were renamed. Returns `true` when all upstreams answered.
+pub async fn check_tools(proxy: &Proxy, out: &mut dyn Write) -> Result<bool> {
+    let mut all_listed = true;
+    for upstream in proxy.upstreams() {
+        let name = upstream.name();
+        writeln!(out, "{name}")?;
+        match upstream.tools().await {
+            Ok(_) => {
+                for (exposed, original) in upstream.tool_names() {
+                    let full = format!("{name}{SEPARATOR}{exposed}");
+                    if exposed == original {
+                        writeln!(out, "  {full}")?;
+                    } else {
+                        writeln!(out, "  {full}  (renamed from {original:?})")?;
+                    }
+                }
+            }
+            Err(reason) => {
+                all_listed = false;
+                writeln!(out, "  ERROR ({reason})")?;
+            }
+        }
+    }
+    proxy.shutdown().await;
+    Ok(all_listed)
 }
 
 /// Reads a secret without echoing it when stdin is a terminal; otherwise reads one line.

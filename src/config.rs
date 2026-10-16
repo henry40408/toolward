@@ -146,6 +146,10 @@ fn contains_reference(value: &serde_json::Value) -> bool {
     }
 }
 
+/// Longest server name. Tool names are capped (see `names::BUDGET`), and the
+/// server name is a part of each, so it must leave room for the tool.
+pub const MAX_NAME_LEN: usize = 20;
+
 /// Server names become tool prefixes (`<name>__<tool>`), so `__` is reserved.
 fn validate_name(name: &str) -> Result<(), String> {
     let charset_ok = !name.is_empty()
@@ -158,6 +162,11 @@ fn validate_name(name: &str) -> Result<(), String> {
              and without a leading or trailing '_'"
                 .into(),
         );
+    }
+    if name.len() > MAX_NAME_LEN {
+        return Err(format!(
+            "name must be at most {MAX_NAME_LEN} characters: it is part of every tool name"
+        ));
     }
     Ok(())
 }
@@ -184,6 +193,19 @@ impl Config {
     }
 
     fn validate(&self) -> Result<(), ConfigError> {
+        // Some clients turn '-' into '_' (Codex, pi), so "a-b" and "a_b" would clash.
+        let mut folded: BTreeMap<String, &str> = BTreeMap::new();
+        for name in self.mcp_servers.keys() {
+            if let Some(other) = folded.insert(name.replace('-', "_"), name) {
+                return Err(ConfigError::Server {
+                    name: name.clone(),
+                    reason: format!(
+                        "name differs from {other:?} only by '-' versus '_'; \
+                         some clients treat them as the same"
+                    ),
+                });
+            }
+        }
         for (name, server) in &self.mcp_servers {
             let fail = |reason: String| ConfigError::Server {
                 name: name.clone(),
@@ -197,6 +219,14 @@ impl Config {
                     .is_empty()
             {
                 return Err(fail("'command' must not contain secret references".into()));
+            }
+            // URLs end up in logs and error messages; secrets belong in 'headers'.
+            if let Some(url) = &server.url
+                && !interpolate::references(url).unwrap_or_default().is_empty()
+            {
+                return Err(fail(
+                    "'url' must not contain secret references; use 'headers' instead".into(),
+                ));
             }
             // Arguments are visible to every local process (`ps`); use 'env' instead.
             if server
@@ -326,6 +356,19 @@ mod tests {
     }
 
     #[test]
+    fn rejects_long_names_and_dash_underscore_clashes() {
+        let long = "a".repeat(MAX_NAME_LEN + 1);
+        let text = format!(r#"{{"mcpServers": {{"{long}": {{"command": "x"}}}}}}"#);
+        assert!(err(&text).contains("at most 20"));
+        let ok = "a".repeat(MAX_NAME_LEN);
+        let text = format!(r#"{{"mcpServers": {{"{ok}": {{"command": "x"}}}}}}"#);
+        assert!(Config::parse(&text).is_ok());
+
+        let clash = r#"{"mcpServers": {"a-b": {"command": "x"}, "a_b": {"command": "x"}}}"#;
+        assert!(err(clash).contains("only by '-' versus '_'"));
+    }
+
+    #[test]
     fn rejects_bad_transports() {
         let cases = [
             (r#"{}"#, "either 'command'"),
@@ -347,6 +390,8 @@ mod tests {
         assert!(err(in_command).contains("'command' must not"));
         let in_args = r#"{"mcpServers":{"s":{"command":"x","args":["--token=${keychain:x}"]}}}"#;
         assert!(err(in_args).contains("'args' must not"));
+        let in_url = r#"{"mcpServers":{"s":{"url":"https://h/mcp?key=${keychain:x}"}}}"#;
+        assert!(err(in_url).contains("'url' must not"));
         let in_extra = r#"{"mcpServers":{"s":{"command":"x","cwd":"${keychain:x}"}}}"#;
         assert!(err(in_extra).contains("not supported in field \"cwd\""));
     }

@@ -41,10 +41,20 @@ fn run(cli: Cli) -> Result<ExitCode> {
             let store = KeyringStore::native()?;
             cli::secret_delete(&store, account, &mut out)?;
         }
-        Command::Check => {
+        Command::Check { tools } => {
             let config = Config::load(&cli.config_path()?)?;
             let store = KeyringStore::native()?;
-            if !cli::check(&config, &store, &mut out)? {
+            let mut ok = cli::check(&config, &store, &mut out)?;
+            if *tools {
+                let store: Arc<dyn CredentialStore> = Arc::new(store);
+                let proxy = Proxy::from_config(&config, &store);
+                writeln!(out)?;
+                let runtime = tokio::runtime::Builder::new_multi_thread()
+                    .enable_all()
+                    .build()?;
+                ok &= runtime.block_on(cli::check_tools(&proxy, &mut out))?;
+            }
+            if !ok {
                 out.flush()?;
                 return Ok(ExitCode::FAILURE);
             }

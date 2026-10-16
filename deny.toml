@@ -3,11 +3,22 @@ all-features = true
 
 [advisories]
 version = 2
+# Fixed in rustls 0.23.46, which was published less than 7 days before it
+# would have been added. Remove these once 0.23.46 is old enough to adopt.
+ignore = [
+    "RUSTSEC-2026-0346",
+    "RUSTSEC-2026-0347",
+    "RUSTSEC-2026-0348",
+    "RUSTSEC-2026-0349",
+]
 
 [licenses]
 version = 2
 allow = [
     "Apache-2.0",
+    "BSD-3-Clause",
+    "CDLA-Permissive-2.0",
+    "ISC",
     "MIT",
     "Unicode-3.0",
 ]
