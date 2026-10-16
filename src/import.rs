@@ -4,7 +4,7 @@
 //! Only environment variables and HTTP headers whose *names* look like
 //! secrets are moved. Nothing here prints or logs a secret value.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
@@ -275,10 +275,100 @@ pub fn plan(source: &str) -> Result<Plan> {
     Ok(plan)
 }
 
+/// Every account named by a `${keychain:...}` reference inside `value`.
+fn collect_refs(value: &Value, out: &mut BTreeSet<String>) {
+    match value {
+        Value::String(text) => out.extend(crate::interpolate::references(text).unwrap_or_default()),
+        Value::Array(items) => items.iter().for_each(|v| collect_refs(v, out)),
+        Value::Object(map) => map.values().for_each(|v| collect_refs(v, out)),
+        _ => {}
+    }
+}
+
+/// Picks the account that will hold each secret: the planned name, or the
+/// next free `<name>-2`, `-3`, ... when that account is taken. An account is
+/// taken when it holds a different secret or the existing config refers to it.
+/// An account that already holds the same secret is reused. Returns, per
+/// secret, the account and whether this run has to create it.
+fn choose_accounts(
+    plan: &Plan,
+    store: &dyn CredentialStore,
+    refs: &BTreeSet<String>,
+) -> Result<Vec<(String, bool)>> {
+    let planned: BTreeSet<&str> = plan.secrets.iter().map(|(a, _)| a.as_str()).collect();
+    let mut claimed: BTreeSet<String> = BTreeSet::new();
+    let mut chosen = Vec::new();
+    for (wanted, secret) in &plan.secrets {
+        let mut n = 1u32;
+        loop {
+            let candidate = if n == 1 {
+                wanted.clone()
+            } else {
+                format!("{wanted}-{n}")
+            };
+            n += 1;
+            if n > 10_000 {
+                bail!("no free account name found for {wanted:?}");
+            }
+            let free_name = !claimed.contains(&candidate)
+                && !refs.contains(&candidate)
+                && (candidate == *wanted || !planned.contains(candidate.as_str()));
+            if !free_name {
+                continue;
+            }
+            validate_user_account(&candidate)?;
+            match store.get(&candidate)? {
+                None => chosen.push((candidate.clone(), true)),
+                Some(current) if current == *secret => chosen.push((candidate.clone(), false)),
+                Some(_) => continue,
+            }
+            claimed.insert(candidate);
+            break;
+        }
+    }
+    Ok(chosen)
+}
+
+/// Points the value that `m` describes at `new` instead of `m.account`.
+fn retarget(servers: &mut Map<String, Value>, m: &Move, new: &str) {
+    let Some((kind, key)) = m.place.split_once(' ') else {
+        return;
+    };
+    let kind = if kind == "header" { "headers" } else { kind };
+    if let Some(Value::String(text)) = servers
+        .get_mut(&m.server)
+        .and_then(|s| s.get_mut(kind))
+        .and_then(|t| t.get_mut(key))
+    {
+        *text = text.replace(
+            &format!("${{keychain:{}}}", m.account),
+            &format!("${{keychain:{new}}}"),
+        );
+    }
+}
+
+/// Deletes the accounts this run created. Returns the ones that stayed.
+fn roll_back(store: &dyn CredentialStore, created: &[String]) -> Vec<String> {
+    created
+        .iter()
+        .filter(|account| store.delete(account).is_err())
+        .cloned()
+        .collect()
+}
+
 /// Stores the secrets and writes the servers into the config file at `path`,
 /// merging with what is there (comments in an existing file are lost).
-/// Nothing is written unless every check passes first.
-pub fn apply(plan: &Plan, store: &dyn CredentialStore, path: &Path) -> Result<()> {
+/// Nothing is written unless every check passes first. If storing a secret or
+/// replacing the file fails, the accounts this run created are deleted again.
+///
+/// An account that holds a different secret is not overwritten: the secret
+/// goes to the next free name (`<name>-2`, ...), and `plan` is updated to say
+/// so, so `report` shows the names that were really used.
+///
+/// Limitation: the check (`get`) and the write (`set`) are not atomic, so a
+/// concurrent writer to the same account can still be overwritten, or have its
+/// new account deleted again by the rollback.
+pub fn apply(plan: &mut Plan, store: &dyn CredentialStore, path: &Path) -> Result<()> {
     for (account, _) in &plan.secrets {
         validate_user_account(account)?;
     }
@@ -306,22 +396,19 @@ pub fn apply(plan: &Plan, store: &dyn CredentialStore, path: &Path) -> Result<()
             bail!("the config already has a server named {name:?}");
         }
     }
-    let mut stale: BTreeMap<&str, ()> = BTreeMap::new();
-    for (account, secret) in &plan.secrets {
-        if let Some(current) = store.get(account)?
-            && current != *secret
-        {
-            stale.insert(account, ());
+    let mut refs = BTreeSet::new();
+    existing.values().for_each(|v| collect_refs(v, &mut refs));
+    let chosen = choose_accounts(plan, store, &refs)?;
+
+    let mut servers = plan.servers.clone();
+    let mut moves = plan.moves.clone();
+    for (m, (account, _)) in moves.iter_mut().zip(&chosen) {
+        if m.account != *account {
+            retarget(&mut servers, m, account);
+            m.account.clone_from(account);
         }
     }
-    if let Some((account, _)) = stale.iter().next() {
-        bail!(
-            "account {account:?} already holds a different secret; \
-             run `toolward secret delete {account}` first"
-        );
-    }
-
-    existing.extend(plan.servers.clone());
+    existing.extend(servers.clone());
     let text = serde_json::to_string_pretty(&Value::Object(document))? + "\n";
     // The merged file must load, or nothing is stored.
     Config::parse(&text)
@@ -333,19 +420,39 @@ pub fn apply(plan: &Plan, store: &dyn CredentialStore, path: &Path) -> Result<()
         std::fs::create_dir_all(dir).with_context(|| format!("cannot create {}", dir.display()))?;
     }
     let temp = path.with_extension("json.tmp");
+    let mut created: Vec<String> = Vec::new();
     let result = write_private(&temp, &text)
         .with_context(|| format!("cannot write {}", temp.display()))
         .and_then(|()| {
-            for (account, secret) in &plan.secrets {
-                store.set(account, secret)?;
+            for ((account, needs_set), (_, secret)) in chosen.iter().zip(&plan.secrets) {
+                if *needs_set {
+                    // A failed `set` may still have created the account.
+                    created.push(account.clone());
+                    store
+                        .set(account, secret)
+                        .with_context(|| format!("cannot store {account}"))?;
+                }
             }
             std::fs::rename(&temp, &path)
                 .with_context(|| format!("cannot replace {}", path.display()))
         });
-    if result.is_err() {
+    if let Err(err) = result {
         let _ = std::fs::remove_file(&temp);
+        let left = roll_back(store, &created);
+        if left.is_empty() {
+            return Err(err);
+        }
+        bail!(
+            "{err:#}; also could not remove the stored account(s): {}",
+            left.join(", ")
+        );
     }
-    result
+    for ((account, _), (slot, _)) in chosen.iter().zip(plan.secrets.iter_mut()) {
+        slot.clone_from(account);
+    }
+    plan.servers = servers;
+    plan.moves = moves;
+    Ok(())
 }
 
 /// Creates `path` readable by the owner only.
@@ -386,6 +493,11 @@ pub fn report(plan: &Plan, applied: bool, out: &mut dyn std::io::Write) -> Resul
              `toolward serve`, and rotate the tokens that were in that file."
         )?;
     } else {
+        writeln!(
+            out,
+            "\nNote: with --apply, an account name gets a numeric suffix (-2, -3, ...) \
+             if that name already holds a different value."
+        )?;
         writeln!(
             out,
             "\nNothing was changed. Run again with --apply to do it."
@@ -460,7 +572,7 @@ mod tests {
         let path = dir.path().join("config.json");
         std::fs::write(&path, r#"{"mcpServers": {"keep": {"command": "x"}}}"#).unwrap();
         let store = MemoryStore::new();
-        apply(&plan(SOURCE).unwrap(), &store, &path).unwrap();
+        apply(&mut plan(SOURCE).unwrap(), &store, &path).unwrap();
         assert_eq!(
             store.get("gh-authorization").unwrap().as_deref(),
             Some("ghp_SECRET1")
@@ -482,17 +594,279 @@ mod tests {
         let path = dir.path().join("config.json");
         std::fs::write(&path, r#"{"mcpServers": {"gh": {"command": "x"}}}"#).unwrap();
         let store = MemoryStore::new();
-        let err = apply(&plan(SOURCE).unwrap(), &store, &path).unwrap_err();
+        let err = apply(&mut plan(SOURCE).unwrap(), &store, &path).unwrap_err();
         assert!(err.to_string().contains("already has a server"), "{err}");
         assert_eq!(store.get("db-db_token").unwrap(), None);
+    }
 
-        std::fs::remove_file(&path).unwrap();
-        store.set("gh-authorization", "different").unwrap();
-        let err = apply(&plan(SOURCE).unwrap(), &store, &path).unwrap_err();
-        assert!(err.to_string().contains("different secret"), "{err}");
-        assert!(!err.to_string().contains("different\""));
+    /// Fails the Nth `set` (1-based) and, optionally, every `delete`.
+    struct FailingStore {
+        inner: MemoryStore,
+        fail_set_at: usize,
+        fail_delete: bool,
+        sets: std::sync::atomic::AtomicUsize,
+    }
+
+    impl FailingStore {
+        fn new(inner: MemoryStore, fail_set_at: usize, fail_delete: bool) -> Self {
+            Self {
+                inner,
+                fail_set_at,
+                fail_delete,
+                sets: Default::default(),
+            }
+        }
+    }
+
+    impl CredentialStore for FailingStore {
+        fn get(&self, account: &str) -> Result<Option<String>, crate::store::StoreError> {
+            self.inner.get(account)
+        }
+        fn set(&self, account: &str, secret: &str) -> Result<(), crate::store::StoreError> {
+            let n = self.sets.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+            if n == self.fail_set_at {
+                return Err(crate::store::StoreError::Backend("denied".into()));
+            }
+            self.inner.set(account, secret)
+        }
+        fn delete(&self, account: &str) -> Result<bool, crate::store::StoreError> {
+            if self.fail_delete {
+                return Err(crate::store::StoreError::Backend("denied".into()));
+            }
+            self.inner.delete(account)
+        }
+    }
+
+    const ORIGINAL: &str = r#"{"mcpServers": {"keep": {"command": "x"}}}"#;
+
+    #[test]
+    fn failed_set_rolls_back_only_new_accounts() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        std::fs::write(&path, ORIGINAL).unwrap();
+        // db-db_token already holds the same value, so it is not ours to delete.
+        let inner = MemoryStore::with(&[("db-db_token", "tok-SECRET2")]);
+        let store = FailingStore::new(inner, 1, false);
+        let mut plan = plan(SOURCE).unwrap();
+        // Order is db (existing, reused), gh (the failing set).
+        let err = apply(&mut plan, &store, &path).unwrap_err();
+        assert!(format!("{err:#}").contains("denied"), "{err:#}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), ORIGINAL);
+        assert!(!dir.path().join("config.json.tmp").exists());
+        assert_eq!(
+            store.get("db-db_token").unwrap().as_deref(),
+            Some("tok-SECRET2")
+        );
+        assert_eq!(store.get("gh-authorization").unwrap(), None);
+    }
+
+    #[test]
+    fn failure_after_a_set_deletes_what_this_run_created() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        std::fs::write(&path, ORIGINAL).unwrap();
+        let store = FailingStore::new(MemoryStore::with(&[("other", "o-SECRET9")]), 2, false);
+        let err = apply(&mut plan(SOURCE).unwrap(), &store, &path).unwrap_err();
+        assert!(format!("{err:#}").contains("denied"), "{err:#}");
         assert_eq!(store.get("db-db_token").unwrap(), None);
+        assert_eq!(store.get("gh-authorization").unwrap(), None);
+        assert_eq!(store.get("other").unwrap().as_deref(), Some("o-SECRET9"));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), ORIGINAL);
+        assert!(!dir.path().join("config.json.tmp").exists());
+    }
+
+    #[test]
+    fn rollback_failure_is_reported_by_account_name_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let store = FailingStore::new(MemoryStore::new(), 2, true);
+        let err = apply(&mut plan(SOURCE).unwrap(), &store, &path).unwrap_err();
+        let text = format!("{err:#}");
+        assert!(text.contains("denied"), "{text}");
+        assert!(text.contains("db-db_token"), "{text}");
+        assert!(!text.contains("SECRET"), "{text}");
         assert!(!path.exists());
+        assert!(!dir.path().join("config.json.tmp").exists());
+    }
+
+    #[test]
+    fn failed_rename_deletes_what_this_run_created() {
+        /// Creates a directory at the config path on every `set`, so the
+        /// final rename fails after the secrets are stored.
+        struct DirOnSet {
+            inner: MemoryStore,
+            dir: std::path::PathBuf,
+        }
+        impl CredentialStore for DirOnSet {
+            fn get(&self, account: &str) -> Result<Option<String>, crate::store::StoreError> {
+                self.inner.get(account)
+            }
+            fn set(&self, account: &str, secret: &str) -> Result<(), crate::store::StoreError> {
+                let _ = std::fs::create_dir(&self.dir);
+                self.inner.set(account, secret)
+            }
+            fn delete(&self, account: &str) -> Result<bool, crate::store::StoreError> {
+                self.inner.delete(account)
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let store = DirOnSet {
+            inner: MemoryStore::with(&[("other", "o-SECRET9"), ("db-db_token", "tok-SECRET2")]),
+            dir: path.clone(),
+        };
+        assert!(!path.exists());
+        let err = apply(&mut plan(SOURCE).unwrap(), &store, &path).unwrap_err();
+        assert!(err.to_string().contains("cannot replace"), "{err:#}");
+        // gh-authorization was created by this run; the other two were not.
+        assert_eq!(store.get("gh-authorization").unwrap(), None);
+        assert_eq!(store.get("other").unwrap().as_deref(), Some("o-SECRET9"));
+        assert_eq!(
+            store.get("db-db_token").unwrap().as_deref(),
+            Some("tok-SECRET2")
+        );
+        assert!(!dir.path().join("config.json.tmp").exists());
+    }
+
+    #[test]
+    fn a_bearer_header_is_retargeted_keeping_its_scheme() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let store = MemoryStore::with(&[("gh-authorization", "different-SECRET")]);
+        let mut plan = plan(SOURCE).unwrap();
+        apply(&mut plan, &store, &path).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            text.contains("Bearer ${keychain:gh-authorization-2}"),
+            "{text}"
+        );
+        assert!(!text.contains("${keychain:gh-authorization}"), "{text}");
+        assert!(
+            plan.config_json()
+                .to_string()
+                .contains("Bearer ${keychain:gh-authorization-2}")
+        );
+        assert_eq!(
+            store.get("gh-authorization").unwrap().as_deref(),
+            Some("different-SECRET")
+        );
+    }
+
+    #[test]
+    fn a_suffix_that_another_entry_wants_is_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        // Both keys map to s-a_token; the planner names them s-a_token and s-a_token-2.
+        let source = r#"{"mcpServers": {"s": {"command": "y",
+            "env": {"A_TOKEN": "tok-SECRET4", "a_token": "tok-SECRET5"}}}}"#;
+        let store = MemoryStore::with(&[("s-a_token", "different-SECRET")]);
+        let mut plan = plan(source).unwrap();
+        let wanted: Vec<&str> = plan.moves.iter().map(|m| m.account.as_str()).collect();
+        assert_eq!(wanted, ["s-a_token", "s-a_token-2"]);
+        apply(&mut plan, &store, &path).unwrap();
+        let accounts: Vec<&str> = plan.moves.iter().map(|m| m.account.as_str()).collect();
+        assert_eq!(accounts, ["s-a_token-3", "s-a_token-2"]);
+        assert_eq!(
+            store.get("s-a_token-3").unwrap().as_deref(),
+            Some("tok-SECRET4")
+        );
+        assert_eq!(
+            store.get("s-a_token-2").unwrap().as_deref(),
+            Some("tok-SECRET5")
+        );
+    }
+
+    #[test]
+    fn a_suffixed_account_with_the_same_value_is_reused_and_kept_on_rollback() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let inner = MemoryStore::with(&[
+            ("gh-authorization", "different-SECRET"),
+            ("gh-authorization-2", "ghp_SECRET1"),
+        ]);
+        // Only db-db_token needs a set; make it fail.
+        let store = FailingStore::new(inner, 1, false);
+        let err = apply(&mut plan(SOURCE).unwrap(), &store, &path).unwrap_err();
+        assert!(format!("{err:#}").contains("denied"), "{err:#}");
+        assert_eq!(store.sets.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(
+            store.get("gh-authorization-2").unwrap().as_deref(),
+            Some("ghp_SECRET1")
+        );
+        assert_eq!(
+            store.get("gh-authorization").unwrap().as_deref(),
+            Some("different-SECRET")
+        );
+
+        // On success the reused account is referenced and no extra account exists.
+        let store = MemoryStore::with(&[
+            ("gh-authorization", "different-SECRET"),
+            ("gh-authorization-2", "ghp_SECRET1"),
+        ]);
+        apply(&mut plan(SOURCE).unwrap(), &store, &path).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("${keychain:gh-authorization-2}"), "{text}");
+        assert_eq!(store.get("gh-authorization-3").unwrap(), None);
+    }
+
+    #[test]
+    fn plan_is_unchanged_after_a_failed_apply() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let store = FailingStore::new(
+            MemoryStore::with(&[("gh-authorization", "different-SECRET")]),
+            2,
+            false,
+        );
+        let mut plan = plan(SOURCE).unwrap();
+        let json = plan.config_json();
+        let moves = plan.moves.clone();
+        let secrets = plan.secrets.clone();
+        assert!(apply(&mut plan, &store, &path).is_err());
+        assert_eq!(plan.config_json(), json);
+        assert_eq!(plan.moves, moves);
+        assert_eq!(plan.secrets, secrets);
+    }
+
+    #[test]
+    fn a_taken_account_gets_a_suffixed_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        // The existing config refers to db-db_token-2, so it is not free either.
+        std::fs::write(
+            &path,
+            r#"{"mcpServers": {"keep": {"command": "x", "env": {"A": "${keychain:db-db_token-2}"}}}}"#,
+        )
+        .unwrap();
+        let store = MemoryStore::with(&[("db-db_token", "different-SECRET")]);
+        let mut plan = plan(SOURCE).unwrap();
+        apply(&mut plan, &store, &path).unwrap();
+
+        assert_eq!(
+            store.get("db-db_token").unwrap().as_deref(),
+            Some("different-SECRET")
+        );
+        assert_eq!(
+            store.get("db-db_token-3").unwrap().as_deref(),
+            Some("tok-SECRET2")
+        );
+        assert_eq!(store.get("db-db_token-2").unwrap(), None);
+        let accounts: Vec<&str> = plan.moves.iter().map(|m| m.account.as_str()).collect();
+        assert_eq!(accounts, ["db-db_token-3", "gh-authorization"]);
+        let mut out = Vec::new();
+        report(&plan, true, &mut out).unwrap();
+        let out = String::from_utf8(out).unwrap();
+        assert!(out.contains("${keychain:db-db_token-3}"), "{out}");
+
+        // The written config and the store expand back to the original values.
+        let config = Config::load(&path).unwrap();
+        let env = config.mcp_servers["db"].env.clone();
+        let token = crate::interpolate::expand(&env["DB_TOKEN"], &store).unwrap();
+        assert_eq!(token, "tok-SECRET2");
+        let headers = config.mcp_servers["gh"].headers.clone();
+        let auth = crate::interpolate::expand(&headers["Authorization"], &store).unwrap();
+        assert_eq!(auth, "Bearer ghp_SECRET1");
     }
 
     #[test]
@@ -514,7 +888,7 @@ mod tests {
         let store = MemoryStore::new();
         let source =
             r#"{"mcpServers": {"a_b": {"command": "y", "env": {"T_TOKEN": "tok-SECRET3"}}}}"#;
-        let err = apply(&plan(source).unwrap(), &store, &path).unwrap_err();
+        let err = apply(&mut plan(source).unwrap(), &store, &path).unwrap_err();
         assert!(err.to_string().contains("merged"), "{err}");
         assert_eq!(store.get("a_b-t_token").unwrap(), None);
         assert!(!dir.path().join("config.json.tmp").exists());
@@ -526,7 +900,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.json");
-        apply(&plan(SOURCE).unwrap(), &MemoryStore::new(), &path).unwrap();
+        apply(&mut plan(SOURCE).unwrap(), &MemoryStore::new(), &path).unwrap();
         let mode = std::fs::metadata(&path).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600);
     }

@@ -74,10 +74,10 @@ fn run(cli: Cli) -> Result<ExitCode> {
         Command::Import { file, apply } => {
             let source = std::fs::read_to_string(file)
                 .with_context(|| format!("cannot read {}", file.display()))?;
-            let plan = import::plan(&source)?;
+            let mut plan = import::plan(&source)?;
             if *apply {
                 let store = KeyringStore::native()?;
-                import::apply(&plan, &store, &cli.config_path()?)?;
+                import::apply(&mut plan, &store, &cli.config_path()?)?;
             }
             import::report(&plan, *apply, &mut out)?;
         }
