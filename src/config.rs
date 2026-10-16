@@ -66,6 +66,8 @@ pub struct OAuthConfig {
     pub scopes: Vec<String>,
     pub client_id: Option<String>,
     pub client_secret: Option<String>,
+    /// Fixed port for the login redirect; default is a random one.
+    pub callback_port: Option<u16>,
 }
 
 /// How to reach an upstream, after validation.
@@ -99,6 +101,14 @@ impl ServerConfig {
             (None | Some("http"), None, Some(url)) => {
                 if !self.args.is_empty() || !self.env.is_empty() {
                     return Err("'args' and 'env' apply only to stdio servers".into());
+                }
+                if let Some(oauth) = &self.oauth {
+                    if !self.headers.is_empty() {
+                        return Err("'headers' cannot be combined with 'oauth'".into());
+                    }
+                    if oauth.client_secret.is_some() && oauth.client_id.is_none() {
+                        return Err("oauth 'clientSecret' needs 'clientId'".into());
+                    }
                 }
                 Ok(Transport::Http {
                     url,
@@ -257,6 +267,30 @@ impl Config {
         Ok(())
     }
 
+    /// Names of the servers that use OAuth.
+    pub fn oauth_servers(&self) -> impl Iterator<Item = &str> {
+        self.mcp_servers
+            .iter()
+            .filter(|(_, server)| server.oauth.is_some() && server.url.is_some())
+            .map(|(name, _)| name.as_str())
+    }
+
+    /// The URL and OAuth settings of a server, or why it has none.
+    pub fn oauth_server(&self, name: &str) -> Result<(&str, &OAuthConfig), String> {
+        let server = self
+            .mcp_servers
+            .get(name)
+            .ok_or_else(|| format!("no server named {name:?} in the config"))?;
+        match server.transport()? {
+            Transport::Http {
+                url,
+                oauth: Some(oauth),
+                ..
+            } => Ok((url, oauth)),
+            _ => Err(format!("server {name:?} has no \"oauth\" setting")),
+        }
+    }
+
     /// Accounts referenced by each server, without reading any secret.
     pub fn references(&self) -> BTreeMap<&str, BTreeSet<String>> {
         self.mcp_servers
@@ -301,7 +335,7 @@ mod tests {
         "sentry": {
           "type": "http",
           "url": "https://mcp.sentry.dev/mcp",
-          "oauth": { "scopes": ["org:read"], "clientSecret": "${keychain:sentry-cs}" }
+          "oauth": { "scopes": ["org:read"], "clientId": "tw-client", "clientSecret": "${keychain:sentry-cs}" }
         }
       }
     }"#;
@@ -338,6 +372,17 @@ mod tests {
     #[test]
     fn empty_servers_is_valid() {
         assert!(Config::parse("{}").unwrap().mcp_servers.is_empty());
+    }
+
+    #[test]
+    fn rejects_inconsistent_oauth_settings() {
+        for server in [
+            r#"{"url": "https://x/mcp", "oauth": {}, "headers": {"A": "b"}}"#,
+            r#"{"url": "https://x/mcp", "oauth": {"clientSecret": "${keychain:s}"}}"#,
+        ] {
+            let text = format!(r#"{{"mcpServers": {{"a": {server}}}}}"#);
+            assert!(Config::parse(&text).is_err(), "{server}");
+        }
     }
 
     #[test]

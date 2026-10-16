@@ -4,7 +4,7 @@
 //! * `$${` is an escape for a literal `${`.
 //! * Any other `${...}` is rejected so typos never reach an upstream verbatim.
 
-use crate::store::{CredentialStore, StoreError, validate_account};
+use crate::store::{CredentialStore, StoreError, validate_user_account};
 
 #[derive(Debug, thiserror::Error)]
 pub enum InterpolateError {
@@ -41,7 +41,7 @@ fn parse(input: &str) -> Result<Vec<Segment<'_>>, InterpolateError> {
             let account = body
                 .strip_prefix("keychain:")
                 .ok_or(InterpolateError::Unsupported)?;
-            validate_account(account)?;
+            validate_user_account(account)?;
             if !literal.is_empty() {
                 segments.push(Segment::Literal(std::mem::take(&mut literal)));
             }

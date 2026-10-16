@@ -6,8 +6,9 @@ use clap::{Parser, Subcommand};
 
 use crate::config::{self, Config};
 use crate::names::SEPARATOR;
+use crate::oauth;
 use crate::proxy::Proxy;
-use crate::store::{CredentialStore, validate_account};
+use crate::store::{CredentialStore, validate_user_account};
 
 #[derive(Debug, Parser)]
 #[command(version, about)]
@@ -25,6 +26,9 @@ pub enum Command {
     /// Manage secrets in the credential store
     #[command(subcommand)]
     Secret(SecretCommand),
+    /// Log in to, or out of, an OAuth server
+    #[command(subcommand)]
+    Auth(AuthCommand),
     /// Validate the config and report which referenced secrets are missing
     Check {
         /// Also connect to every server and list the tool names the agent will see
@@ -33,6 +37,14 @@ pub enum Command {
     },
     /// Run the MCP proxy on stdio (this is what an agent's mcp.json should launch)
     Serve,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum AuthCommand {
+    /// Authorize in the browser and store the tokens in the credential store
+    Login { server: String },
+    /// Remove the stored tokens
+    Logout { server: String },
 }
 
 #[derive(Debug, Subcommand)]
@@ -58,7 +70,7 @@ pub fn secret_set(
     secret: &str,
     out: &mut dyn Write,
 ) -> Result<()> {
-    validate_account(account)?;
+    validate_user_account(account)?;
     if secret.is_empty() {
         bail!("refusing to store an empty secret");
     }
@@ -88,6 +100,15 @@ pub fn check(config: &Config, store: &dyn CredentialStore, out: &mut dyn Write) 
         writeln!(out, "{server}")?;
         if accounts.is_empty() {
             writeln!(out, "  (no secret references)")?;
+        }
+        if let Some(oauth) = config.oauth_servers().find(|name| *name == server) {
+            let status = match oauth::is_logged_in(store, oauth) {
+                Ok(true) => "logged in".to_owned(),
+                Ok(false) => format!("NOT LOGGED IN (run `toolward auth login {server}`)"),
+                Err(err) => format!("ERROR ({err})"),
+            };
+            all_present &= status == "logged in";
+            writeln!(out, "  oauth: {status}")?;
         }
         for account in accounts {
             let status = match store.get(&account) {

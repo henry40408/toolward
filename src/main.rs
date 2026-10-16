@@ -6,10 +6,10 @@ use anyhow::Result;
 use clap::Parser;
 use rmcp::ServiceExt;
 
-use toolward::cli::{self, Cli, Command, SecretCommand};
+use toolward::cli::{self, AuthCommand, Cli, Command, SecretCommand};
 use toolward::config::Config;
 use toolward::proxy::Proxy;
-use toolward::store::{CachedStore, CredentialStore, KeyringStore, validate_account};
+use toolward::store::{CachedStore, CredentialStore, KeyringStore, validate_user_account};
 
 fn main() -> ExitCode {
     match run(Cli::parse()) {
@@ -32,7 +32,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
     let mut out = io::stdout().lock();
     match &cli.command {
         Command::Secret(SecretCommand::Set { account }) => {
-            validate_account(account)?;
+            validate_user_account(account)?;
             let store = KeyringStore::native()?;
             let secret = cli::read_secret(account)?;
             cli::secret_set(&store, account, &secret, &mut out)?;
@@ -40,6 +40,35 @@ fn run(cli: Cli) -> Result<ExitCode> {
         Command::Secret(SecretCommand::Delete { account }) => {
             let store = KeyringStore::native()?;
             cli::secret_delete(&store, account, &mut out)?;
+        }
+        Command::Auth(AuthCommand::Login { server }) => {
+            let config = Config::load(&cli.config_path()?)?;
+            let (url, oauth) = config.oauth_server(server).map_err(anyhow::Error::msg)?;
+            let store: Arc<dyn CredentialStore> = Arc::new(KeyringStore::native()?);
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()?;
+            let request = toolward::oauth::LoginRequest { server, url, oauth };
+            let announce = |url: &str| {
+                eprintln!("Opening your browser. If it does not open, visit:\n{url}");
+            };
+            runtime
+                .block_on(toolward::oauth::login(
+                    request,
+                    store,
+                    &announce,
+                    toolward::oauth::LOGIN_TIMEOUT,
+                ))
+                .map_err(anyhow::Error::msg)?;
+            writeln!(out, "logged in to {server:?}")?;
+        }
+        Command::Auth(AuthCommand::Logout { server }) => {
+            let store = KeyringStore::native()?;
+            if toolward::oauth::logout(&store, server).map_err(anyhow::Error::msg)? {
+                writeln!(out, "logged out of {server:?}")?;
+            } else {
+                writeln!(out, "no login stored for {server:?}")?;
+            }
         }
         Command::Check { tools } => {
             let config = Config::load(&cli.config_path()?)?;

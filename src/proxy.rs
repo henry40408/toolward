@@ -21,6 +21,7 @@ use tokio::task::JoinSet;
 
 use crate::config::{Config, Transport};
 use crate::names::SEPARATOR;
+use crate::oauth::{OAuthConnector, OAuthSpec};
 use crate::store::CredentialStore;
 use crate::upstream::{HttpConnector, HttpSpec, Hub, StdioConnector, StdioSpec, Upstream, log};
 
@@ -68,10 +69,18 @@ impl Proxy {
                     headers,
                     oauth,
                 }) => {
-                    if oauth.is_some() {
-                        log(format!(
-                            "skipping {name:?}: oauth upstreams are not supported yet"
-                        ));
+                    if let Some(oauth) = oauth {
+                        if let Err(reason) = crate::oauth::account_for(name) {
+                            log(format!("skipping {name:?}: {reason}"));
+                            continue;
+                        }
+                        let spec = OAuthSpec {
+                            server: name.clone(),
+                            url: url.to_owned(),
+                            client_secret: oauth.client_secret.clone(),
+                        };
+                        let connector = OAuthConnector::new(spec, Arc::clone(store));
+                        upstreams.push(Upstream::new(name, Box::new(connector)));
                         continue;
                     }
                     let spec = HttpSpec {

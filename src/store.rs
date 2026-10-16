@@ -14,6 +14,8 @@ pub const SERVICE: &str = "toolward";
 pub enum StoreError {
     #[error("invalid account name {0:?}: use only ASCII letters, digits, '.', '_' and '-'")]
     InvalidAccount(String),
+    #[error("account names starting with \"oauth.\" are reserved for OAuth logins: {0:?}")]
+    Reserved(String),
     #[error("credential store failure: {0}")]
     Backend(String),
     #[error("no credential store is available on this platform")]
@@ -31,6 +33,16 @@ pub fn validate_account(account: &str) -> Result<(), StoreError> {
     } else {
         Err(StoreError::InvalidAccount(account.to_owned()))
     }
+}
+
+/// Like [`validate_account`], for names a user picks: `oauth.` is reserved for
+/// the tokens that `toolward auth login` stores.
+pub fn validate_user_account(account: &str) -> Result<(), StoreError> {
+    validate_account(account)?;
+    if account.starts_with("oauth.") {
+        return Err(StoreError::Reserved(account.to_owned()));
+    }
+    Ok(())
 }
 
 pub trait CredentialStore: Send + Sync {
@@ -307,6 +319,13 @@ mod tests {
         assert_eq!(store.get("a").unwrap().as_deref(), Some("s3cret"));
         assert!(store.delete("a").unwrap());
         assert!(!store.delete("a").unwrap());
+    }
+
+    #[test]
+    fn oauth_accounts_are_reserved_for_logins() {
+        assert!(validate_user_account("oauth.sentry").is_err());
+        assert!(validate_user_account("github").is_ok());
+        assert!(validate_account("oauth.sentry").is_ok());
     }
 
     #[test]

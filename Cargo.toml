@@ -7,11 +7,13 @@ description = "MCP proxy that keeps credentials out of agent-readable config fil
 
 [dependencies]
 anyhow = "1.0.104"
+async-trait = "0.1.92"
 clap = { version = "4.6.7", features = ["derive"] }
 etcetera = "0.11.0"
 jsonc-parser = { version = "0.34.0", features = ["serde"] }
 keyring-core = "=1.0.0"
-rmcp = { version = "3.5.1", features = ["client", "server", "transport-io", "transport-child-process", "transport-streamable-http-client-reqwest", "reqwest"] }
+rmcp = { version = "3.5.1", features = ["client", "server", "transport-io", "transport-child-process", "transport-streamable-http-client-reqwest", "reqwest", "auth"] }
+reqwest = { version = "0.13.5", default-features = false }
 rpassword = "7.5.4"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "=1.0.151"
