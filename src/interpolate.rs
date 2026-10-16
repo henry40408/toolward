@@ -72,6 +72,16 @@ pub fn references(input: &str) -> Result<Vec<String>, InterpolateError> {
 
 /// Expands every reference in `input` using `store`.
 pub fn expand(input: &str, store: &dyn CredentialStore) -> Result<String, InterpolateError> {
+    expand_collecting(input, store, &mut Vec::new())
+}
+
+/// Like [`expand`], and also appends every secret value it substituted to
+/// `secrets`, so callers can redact those values from output later.
+pub fn expand_collecting(
+    input: &str,
+    store: &dyn CredentialStore,
+    secrets: &mut Vec<String>,
+) -> Result<String, InterpolateError> {
     let mut out = String::new();
     for segment in parse(input)? {
         match segment {
@@ -81,6 +91,7 @@ pub fn expand(input: &str, store: &dyn CredentialStore) -> Result<String, Interp
                     .get(account)?
                     .ok_or_else(|| InterpolateError::Missing(account.to_owned()))?;
                 out.push_str(&secret);
+                secrets.push(secret);
             }
         }
     }

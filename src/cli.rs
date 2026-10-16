@@ -25,6 +25,8 @@ pub enum Command {
     Secret(SecretCommand),
     /// Validate the config and report which referenced secrets are missing
     Check,
+    /// Run the MCP proxy on stdio (this is what an agent's mcp.json should launch)
+    Serve,
 }
 
 #[derive(Debug, Subcommand)]

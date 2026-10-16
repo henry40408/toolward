@@ -32,7 +32,7 @@ pub fn validate_account(account: &str) -> Result<(), StoreError> {
     }
 }
 
-pub trait CredentialStore {
+pub trait CredentialStore: Send + Sync {
     /// Returns `None` when the account has no secret.
     fn get(&self, account: &str) -> Result<Option<String>, StoreError>;
     fn set(&self, account: &str, secret: &str) -> Result<(), StoreError>;

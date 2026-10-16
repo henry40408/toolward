@@ -198,6 +198,18 @@ impl Config {
             {
                 return Err(fail("'command' must not contain secret references".into()));
             }
+            // Arguments are visible to every local process (`ps`); use 'env' instead.
+            if server
+                .args
+                .iter()
+                .any(|arg| !interpolate::references(arg).unwrap_or_default().is_empty())
+            {
+                return Err(fail(
+                    "'args' must not contain secret references (they show up in `ps`); \
+                     pass secrets through 'env'"
+                        .into(),
+                ));
+            }
             for (field, value) in &server.extra {
                 if contains_reference(value) {
                     return Err(fail(format!(
@@ -333,6 +345,8 @@ mod tests {
     fn rejects_references_in_command_and_unused_fields() {
         let in_command = r#"{"mcpServers":{"s":{"command":"${keychain:x}"}}}"#;
         assert!(err(in_command).contains("'command' must not"));
+        let in_args = r#"{"mcpServers":{"s":{"command":"x","args":["--token=${keychain:x}"]}}}"#;
+        assert!(err(in_args).contains("'args' must not"));
         let in_extra = r#"{"mcpServers":{"s":{"command":"x","cwd":"${keychain:x}"}}}"#;
         assert!(err(in_extra).contains("not supported in field \"cwd\""));
     }
