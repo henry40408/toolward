@@ -29,6 +29,14 @@ pub enum Command {
     /// Log in to, or out of, an OAuth server
     #[command(subcommand)]
     Auth(AuthCommand),
+    /// Move plaintext secrets of an existing mcp.json into the credential store
+    Import {
+        /// The mcp.json to read (it is never modified)
+        file: PathBuf,
+        /// Store the secrets and write the config; without it, only show the plan
+        #[arg(long)]
+        apply: bool,
+    },
     /// Validate the config and report which referenced secrets are missing
     Check {
         /// Also connect to every server and list the tool names the agent will see

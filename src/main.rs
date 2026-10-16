@@ -2,12 +2,13 @@ use std::io::{self, Write};
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Parser;
 use rmcp::ServiceExt;
 
 use toolward::cli::{self, AuthCommand, Cli, Command, SecretCommand};
 use toolward::config::Config;
+use toolward::import;
 use toolward::proxy::Proxy;
 use toolward::store::{CachedStore, CredentialStore, KeyringStore, validate_user_account};
 
@@ -69,6 +70,16 @@ fn run(cli: Cli) -> Result<ExitCode> {
             } else {
                 writeln!(out, "no login stored for {server:?}")?;
             }
+        }
+        Command::Import { file, apply } => {
+            let source = std::fs::read_to_string(file)
+                .with_context(|| format!("cannot read {}", file.display()))?;
+            let plan = import::plan(&source)?;
+            if *apply {
+                let store = KeyringStore::native()?;
+                import::apply(&plan, &store, &cli.config_path()?)?;
+            }
+            import::report(&plan, *apply, &mut out)?;
         }
         Command::Check { tools } => {
             let config = Config::load(&cli.config_path()?)?;
