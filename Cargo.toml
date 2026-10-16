@@ -2,5 +2,22 @@
 name = "toolward"
 version = "0.1.0"
 edition = "2024"
+license = "MIT"
+description = "MCP proxy that keeps credentials out of agent-readable config files"
 
 [dependencies]
+anyhow = "1.0.104"
+clap = { version = "4.6.7", features = ["derive"] }
+etcetera = "0.11.0"
+jsonc-parser = { version = "0.34.0", features = ["serde"] }
+keyring-core = "=1.0.0"
+rpassword = "7.5.4"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "=1.0.151"
+thiserror = "2.0.21"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+apple-native-keyring-store = { version = "1.0.2", features = ["keychain"] }
+
+[dev-dependencies]
+tempfile = "3.27.0"
