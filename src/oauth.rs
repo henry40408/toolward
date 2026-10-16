@@ -43,6 +43,8 @@ pub struct TokenStore {
     account: String,
     /// Serializes refreshes within this process.
     refresh: Arc<tokio::sync::Mutex<()>>,
+    /// Told about the tokens of every record saved, so they can be masked.
+    on_save: Option<Arc<dyn Fn(Vec<String>) + Send + Sync>>,
 }
 
 impl TokenStore {
@@ -51,7 +53,13 @@ impl TokenStore {
             store,
             account,
             refresh: Arc::default(),
+            on_save: None,
         }
+    }
+
+    pub fn on_save(mut self, callback: impl Fn(Vec<String>) + Send + Sync + 'static) -> Self {
+        self.on_save = Some(Arc::new(callback));
+        self
     }
 
     async fn blocking<T: Send + 'static>(
@@ -86,8 +94,13 @@ impl RmcpCredentialStore for TokenStore {
     async fn save(&self, credentials: StoredCredentials) -> Result<(), AuthError> {
         let json = serde_json::to_string(&credentials)
             .map_err(|_| AuthError::CredentialStoreError("cannot encode OAuth tokens".into()))?;
+        let tokens = token_values(&credentials);
         self.blocking(move |store, account| store.set(account, &json))
-            .await
+            .await?;
+        if let Some(callback) = &self.on_save {
+            callback(tokens);
+        }
+        Ok(())
     }
 
     async fn clear(&self) -> Result<(), AuthError> {
@@ -146,6 +159,18 @@ impl OAuthConnector {
     }
 }
 
+/// The access and refresh token of a stored login, for redaction.
+fn token_values(credentials: &StoredCredentials) -> Vec<String> {
+    let Ok(json) = serde_json::to_value(credentials) else {
+        return Vec::new();
+    };
+    ["access_token", "refresh_token"]
+        .iter()
+        .filter_map(|key| json["token_response"][key].as_str())
+        .map(str::to_owned)
+        .collect()
+}
+
 fn auth_failure(err: &AuthError, secrets: &[String]) -> String {
     redact(&err.to_string(), secrets)
 }
@@ -154,7 +179,10 @@ impl Connect for OAuthConnector {
     fn connect(&self, handler: UpstreamHandler) -> BoxFuture<'_, Result<RunningClient, String>> {
         Box::pin(async move {
             let account = account_for(&self.spec.server)?;
-            let tokens = TokenStore::new(Arc::clone(&self.store), account);
+            let reread = TokenStore::new(Arc::clone(&self.store), account.clone());
+            let late = handler.clone();
+            let tokens = TokenStore::new(Arc::clone(&self.store), account)
+                .on_save(move |values| late.add_secrets(&values));
             let stored = RmcpCredentialStore::load(&tokens)
                 .await
                 .map_err(|err| auth_failure(&err, &[]))?;
@@ -210,6 +238,13 @@ impl Connect for OAuthConnector {
                     ));
                 }
                 Err(err) => return Err(auth_failure(&err, &secrets)),
+            }
+            // Both tokens, as they are after any refresh, must never reach the agent.
+            let current = RmcpCredentialStore::load(&reread)
+                .await
+                .map_err(|err| auth_failure(&err, &secrets))?;
+            if let Some(current) = current {
+                secrets.extend(token_values(&current));
             }
             handler.remember_secrets(&secrets);
 
@@ -445,6 +480,16 @@ mod tests {
         let memory = Arc::new(MemoryStore::new());
         let store: Arc<dyn CredentialStore> = memory.clone();
         (memory, TokenStore::new(store, "oauth.sentry".into()))
+    }
+
+    #[test]
+    fn token_values_lists_both_tokens() {
+        let response: rmcp::transport::auth::OAuthTokenResponse = serde_json::from_str(
+            r#"{"access_token":"AT-1234","token_type":"Bearer","refresh_token":"RT-5678"}"#,
+        )
+        .unwrap();
+        let creds = StoredCredentials::new("c".into(), Some(response), vec![], None);
+        assert_eq!(token_values(&creds), ["AT-1234", "RT-5678"]);
     }
 
     #[test]

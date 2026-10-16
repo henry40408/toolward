@@ -96,6 +96,17 @@ impl UpstreamHandler {
     pub fn remember_secrets(&self, secrets: &[String]) {
         *self.shared.secrets.lock().unwrap() = secrets.to_vec();
     }
+
+    /// Adds secrets that appeared after the connection was made, such as a
+    /// token the connector refreshed.
+    pub fn add_secrets(&self, secrets: &[String]) {
+        let mut known = self.shared.secrets.lock().unwrap();
+        for secret in secrets {
+            if !known.contains(secret) {
+                known.push(secret.clone());
+            }
+        }
+    }
 }
 
 impl ClientHandler for UpstreamHandler {
@@ -191,6 +202,143 @@ pub fn redact(text: &str, secrets: &[String]) -> String {
         out = out.replace(secret.as_str(), "[REDACTED]");
     }
     out
+}
+
+/// Secrets shorter than this are not masked in results: they would match
+/// ordinary text, and a value that short is no secret worth hiding.
+const MIN_RESULT_SECRET_LEN: usize = 4;
+
+/// Every form in which a secret may appear inside a JSON string value: as is,
+/// JSON-escaped (when the text is itself JSON) and percent-encoded (in URLs).
+/// Longest first, so a secret that contains another one is fully masked.
+fn result_patterns(secrets: &[String]) -> Vec<String> {
+    let mut whole: Vec<&str> = secrets
+        .iter()
+        .map(String::as_str)
+        .filter(|s| s.len() >= MIN_RESULT_SECRET_LEN)
+        .collect();
+    // A multi-line secret (PEM key, JSON key file) may come back one line at a
+    // time, so every line of it counts as a secret too.
+    let lines: Vec<&str> = whole
+        .iter()
+        .flat_map(|s| s.lines().map(str::trim))
+        .filter(|line| line.len() >= MIN_LINE_SECRET_LEN)
+        .collect();
+    whole.extend(lines);
+
+    let mut patterns = Vec::new();
+    for secret in whole {
+        patterns.push(secret.to_owned());
+        let json = serde_json::to_string(secret).unwrap_or_default();
+        if let Some(inner) = json.strip_prefix('"').and_then(|j| j.strip_suffix('"')) {
+            patterns.push(inner.to_owned());
+            // Some encoders (PHP) also escape the slash.
+            patterns.push(inner.replace('/', "\\/"));
+        }
+        for hex in [true, false] {
+            let mut encoded = String::new();
+            for byte in secret.bytes() {
+                if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+                    encoded.push(byte as char);
+                } else if hex {
+                    encoded.push_str(&format!("%{byte:02X}"));
+                } else {
+                    encoded.push_str(&format!("%{byte:02x}"));
+                }
+            }
+            patterns.push(encoded);
+        }
+        patterns.extend(base64_forms(secret.as_bytes()));
+    }
+    patterns.retain(|p| p.len() >= MIN_RESULT_SECRET_LEN);
+    patterns.sort_by_key(|p| std::cmp::Reverse(p.len()));
+    patterns.dedup();
+    patterns
+}
+
+/// A line of a multi-line secret must be at least this long to be masked alone.
+const MIN_LINE_SECRET_LEN: usize = 8;
+
+const BASE64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+fn base64_encode(bytes: &[u8]) -> String {
+    let mut out = String::new();
+    for chunk in bytes.chunks(3) {
+        let n = chunk
+            .iter()
+            .enumerate()
+            .fold(0u32, |n, (i, b)| n | (u32::from(*b) << (16 - 8 * i)));
+        for i in 0..=chunk.len() {
+            out.push(BASE64[(n >> (18 - 6 * i) & 63) as usize] as char);
+        }
+    }
+    out
+}
+
+/// The text a secret becomes inside base64 data, whatever its alignment. Only
+/// the characters that depend on the secret alone are kept.
+fn base64_forms(secret: &[u8]) -> Vec<String> {
+    let mut forms = Vec::new();
+    for offset in 0..3usize {
+        let mut padded = vec![0u8; offset];
+        padded.extend_from_slice(secret);
+        let encoded = base64_encode(&padded);
+        let start = [0, 2, 3][offset];
+        let tail = usize::from(!(offset + secret.len()).is_multiple_of(3));
+        let end = encoded.len();
+        if end > start + tail {
+            forms.push(encoded[start..end - tail].to_owned());
+        }
+    }
+    forms
+}
+
+fn mask_strings(value: &mut serde_json::Value, patterns: &[String]) {
+    match value {
+        serde_json::Value::String(text) => {
+            for pattern in patterns {
+                if text.contains(pattern.as_str()) {
+                    *text = text.replace(pattern.as_str(), "[REDACTED]");
+                }
+            }
+        }
+        serde_json::Value::Array(items) => {
+            items
+                .iter_mut()
+                .for_each(|item| mask_strings(item, patterns));
+        }
+        serde_json::Value::Object(map) => {
+            let entries = std::mem::take(map);
+            for (mut key, mut item) in entries {
+                for pattern in patterns {
+                    if key.contains(pattern.as_str()) {
+                        key = key.replace(pattern.as_str(), "[REDACTED]");
+                    }
+                }
+                mask_strings(&mut item, patterns);
+                map.insert(key, item);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Masks `secrets` in every string of `value` (text, structured content,
+/// resource and prompt bodies). A value that cannot be inspected is an error,
+/// never passed on unchecked.
+pub fn redact_value<T>(value: T, secrets: &[String]) -> Result<T, String>
+where
+    T: serde::Serialize + serde::de::DeserializeOwned,
+{
+    let patterns = result_patterns(secrets);
+    if patterns.is_empty() {
+        return Ok(value);
+    }
+    let mut json = serde_json::to_value(&value)
+        .map_err(|_| "cannot inspect the upstream result for secrets".to_owned())?;
+    mask_strings(&mut json, &patterns);
+    serde_json::from_value(json)
+        .map_err(|_| "cannot inspect the upstream result for secrets".to_owned())
 }
 
 /// Relays a child's stderr to ours with secrets masked. Stderr is piped rather
@@ -371,6 +519,15 @@ impl Upstream {
         redact(text, &self.shared.secrets.lock().unwrap())
     }
 
+    /// Masks the secrets of this upstream in a result on its way to the agent.
+    pub fn redact_result<T>(&self, value: T) -> Result<T, String>
+    where
+        T: serde::Serialize + serde::de::DeserializeOwned,
+    {
+        let secrets = self.shared.secrets.lock().unwrap().clone();
+        redact_value(value, &secrets)
+    }
+
     /// Lets notifications from this upstream reach the agent.
     pub fn attach(&self, hub: Arc<Hub>) {
         let _ = self.shared.hub.set(hub);
@@ -517,6 +674,52 @@ impl Upstream {
 mod tests {
     use super::*;
     use crate::store::MemoryStore;
+
+    #[test]
+    fn results_are_masked_in_keys_base64_lowercase_percent_and_lines() {
+        use serde_json::json;
+        let secret = "tok/en+value=x".to_owned();
+        let pem = "-----BEGIN KEY-----\nAAAABBBBCCCCDDDD\n-----END KEY-----".to_owned();
+        let secrets = vec![secret.clone(), pem];
+        // The secret at every base64 alignment.
+        let b64 = |prefix: &str| base64_encode(format!("{prefix}{secret}").as_bytes());
+        let value = json!({
+            "tok/en+value=x": "key",
+            "lower": "tok%2fen%2bvalue%3dx",
+            "slash": "tok\\/en+value=x",
+            "line": "found AAAABBBBCCCCDDDD here",
+            "b0": b64(""),
+            "b1": b64("a"),
+            "b2": b64("ab"),
+        });
+        let out = redact_value(value, &secrets).unwrap();
+        let text = out.to_string();
+        assert!(!text.contains("tok/en"), "{text}");
+        assert!(!text.contains("AAAABBBB"), "{text}");
+        for key in ["b0", "b1", "b2"] {
+            assert!(
+                out[key].as_str().unwrap().contains("[REDACTED]"),
+                "{key}: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn results_are_masked_in_every_encoding_and_every_field() {
+        use serde_json::json;
+        let secrets = vec!["s3\"cr/et".to_owned(), "abc".to_owned()];
+        let value = json!({
+            "a": "plain s3\"cr/et end",
+            "b": ["{\"k\": \"s3\\\"cr/et\"}", "q=s3%22cr%2Fet", "abc stays"],
+            "s3\"cr/et": 1,
+        });
+        let out = redact_value(value, &secrets).unwrap();
+        assert_eq!(out["a"], "plain [REDACTED] end");
+        assert_eq!(out["b"][0], "{\"k\": \"[REDACTED]\"}");
+        assert_eq!(out["b"][1], "q=[REDACTED]");
+        // Too short to mask without hitting ordinary text.
+        assert_eq!(out["b"][2], "abc stays");
+    }
 
     #[test]
     fn redact_masks_every_secret_longest_first() {

@@ -124,7 +124,9 @@ impl Proxy {
 /// text the server echoed back, so the upstream's secrets are masked.
 fn service_error(upstream: &Upstream, err: ServiceError) -> McpError {
     match err {
-        ServiceError::McpError(err) => err,
+        ServiceError::McpError(err) => upstream
+            .redact_result(err)
+            .unwrap_or_else(|reason| McpError::internal_error(reason, None)),
         other => McpError::internal_error(
             upstream.redact(&format!("upstream request failed: {other}")),
             None,
@@ -158,6 +160,10 @@ async fn call_tool_cancellable(
         ServerResult::CreateTaskResult(result) => Ok(CallToolResponse::Task(result)),
         _ => Err(ServiceError::UnexpectedResponse),
     }
+}
+
+fn redacted_failure(reason: String) -> McpError {
+    McpError::internal_error(reason, None)
 }
 
 fn unavailable(server: &str, reason: String) -> McpError {
@@ -297,12 +303,21 @@ impl ServerHandler for Proxy {
             .map_err(|err| service_error(upstream, err))?;
         // Upstreams on older protocol revisions omit `resultType`, which the
         // 2026-07-28 revision spoken to the client requires.
+        let redact = |err| redacted_failure(err);
         Ok(match response {
-            CallToolResponse::Complete(mut result) => {
+            CallToolResponse::Complete(result) => {
+                let mut result = upstream.redact_result(result).map_err(redact)?;
                 result.result_type.get_or_insert(ResultType::COMPLETE);
                 result.into()
             }
-            other => other,
+            CallToolResponse::InputRequired(result) => {
+                upstream.redact_result(result).map_err(redact)?.into()
+            }
+            CallToolResponse::Task(result) => {
+                upstream.redact_result(result).map_err(redact)?.into()
+            }
+            // A variant added later cannot be inspected, so it is not passed on.
+            _ => return Err(redacted_failure("unsupported upstream result".into())),
         })
     }
 
@@ -355,10 +370,11 @@ impl ServerHandler for Proxy {
             .await
             .map_err(|reason| unavailable(&server, reason))?;
         request.uri = uri;
-        let mut result = peer
+        let result = peer
             .read_resource(request)
             .await
             .map_err(|err| service_error(upstream, err))?;
+        let mut result = upstream.redact_result(result).map_err(redacted_failure)?;
         result.result_type.get_or_insert(ResultType::COMPLETE);
         for content in &mut result.contents {
             match content {
@@ -421,10 +437,11 @@ impl ServerHandler for Proxy {
             .await
             .map_err(|reason| unavailable(server, reason))?;
         request.name = prompt.to_owned();
-        let mut result = peer
+        let result = peer
             .get_prompt(request)
             .await
             .map_err(|err| service_error(upstream, err))?;
+        let mut result = upstream.redact_result(result).map_err(redacted_failure)?;
         result.result_type.get_or_insert(ResultType::COMPLETE);
         Ok(result.into())
     }

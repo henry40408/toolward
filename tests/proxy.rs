@@ -137,12 +137,14 @@ async fn injects_secrets_into_the_child_environment_only() {
     let env = [("FAKE_SECRET", "${keychain:tok}"), ("FAKE_PLAIN", "plain")];
     let harness = start(vec![stdio("fake", &fake_upstream_path(), &env, &store)]).await;
 
-    // The child sees the expanded value...
+    // The child sees the expanded value, but what it echoes back is masked.
     let result = harness
         .call("fake__env", json!({"name": "FAKE_SECRET"}))
         .await
         .unwrap();
-    assert!(text_of(&result).contains("s3cr3t-value"));
+    let echoed = text_of(&result);
+    assert!(echoed.contains("[REDACTED]"), "{echoed}");
+    assert!(!echoed.contains("s3cr3t-value"), "{echoed}");
     let result = harness
         .call("fake__env", json!({"name": "FAKE_PLAIN"}))
         .await

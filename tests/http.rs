@@ -109,18 +109,21 @@ fn result_for(fake: &Fake, method: &str, params: &Value, authorization: &str) ->
             } else {
                 format!("called {name}")
             };
-            json!({"content": [{"type": "text", "text": text}]})
+            json!({
+                "content": [{"type": "text", "text": text}],
+                "structuredContent": {"seen": authorization},
+            })
         }
         "resources/list" => json!({"resources": [
             {"uri": "file:///a b/notes.txt?x=1", "name": "notes"},
         ]}),
         "resources/read" => json!({"contents": [
-            {"uri": params["uri"], "mimeType": "text/plain", "text": "hello"},
+            {"uri": params["uri"], "mimeType": "text/plain", "text": format!("hello{authorization}")},
         ]}),
         "prompts/list" => json!({"prompts": [{"name": "greet"}]}),
         "prompts/get" => json!({"messages": [{
             "role": "user",
-            "content": {"type": "text", "text": format!("prompt {}", params["name"].as_str().unwrap_or_default())},
+            "content": {"type": "text", "text": format!("prompt {}{authorization}", params["name"].as_str().unwrap_or_default())},
         }]}),
         _ => Value::Null,
     }
@@ -239,7 +242,45 @@ async fn tools_are_prefixed_forwarded_and_get_the_secret_header() {
         .call_tool(CallToolRequestParams::new("web__whoami"))
         .await
         .unwrap();
-    assert_eq!(text_of(&result), "Bearer s3cr3t");
+    // The upstream echoes the header it received; the agent must not see it.
+    assert_eq!(text_of(&result), "Bearer [REDACTED]");
+    let everything = serde_json::to_string(&result).unwrap();
+    assert!(!everything.contains("s3cr3t"), "{everything}");
+}
+
+#[tokio::test]
+async fn secrets_are_masked_in_resources_and_prompts() {
+    let fake = fake_with_tools(&[]);
+    let url = serve_fake(fake).await;
+    let store: Arc<dyn CredentialStore> = Arc::new(MemoryStore::with(&[("tok", "s3cr3t")]));
+    let h = start(vec![http_upstream(
+        "web",
+        &url,
+        &[("Authorization", "${keychain:tok}")],
+        &store,
+    )])
+    .await;
+
+    let resources = h.client.peer().list_all_resources().await.unwrap();
+    let read = h
+        .client
+        .peer()
+        .read_resource(ReadResourceRequestParams::new(resources[0].uri.clone()))
+        .await
+        .unwrap();
+    let read = serde_json::to_string(&read).unwrap();
+    assert!(read.contains("hello[REDACTED]"), "{read}");
+    assert!(!read.contains("s3cr3t"), "{read}");
+
+    let prompt = h
+        .client
+        .peer()
+        .get_prompt(GetPromptRequestParams::new("web__greet"))
+        .await
+        .unwrap();
+    let prompt = serde_json::to_string(&prompt).unwrap();
+    assert!(prompt.contains("greet[REDACTED]"), "{prompt}");
+    assert!(!prompt.contains("s3cr3t"), "{prompt}");
 }
 
 #[tokio::test]
