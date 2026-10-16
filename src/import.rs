@@ -137,7 +137,10 @@ fn account_name(server: &str, key: &str) -> String {
         };
         out.push(c);
     }
-    if out.starts_with("oauth.") {
+    if crate::store::RESERVED_PREFIXES
+        .iter()
+        .any(|p| out.starts_with(p))
+    {
         out.insert_str(0, "imported-");
     }
     out
@@ -915,6 +918,10 @@ mod tests {
     fn account_names_are_valid_and_unique() {
         assert_eq!(account_name("My Server", "API/KEY"), "my-server-api-key");
         assert_eq!(account_name("oauth.x", "T"), "imported-oauth.x-t");
+        assert_eq!(
+            account_name("oauth-client.x", "T"),
+            "imported-oauth-client.x-t"
+        );
         let mut planner = Planner {
             moves: vec![],
             secrets: vec![],

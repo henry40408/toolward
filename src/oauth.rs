@@ -16,6 +16,7 @@ use rmcp::transport::auth::{
     CredentialStore as RmcpCredentialStore, OAuthClientConfig, StoredCredentials,
 };
 use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
+use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
@@ -34,6 +35,13 @@ pub fn account_for(server: &str) -> Result<String, String> {
         format!("server name {server:?} cannot be used with oauth: use only ASCII letters, digits, '.', '_' and '-'")
     })?;
     Ok(account)
+}
+
+/// The account that holds the client secret of a dynamically registered
+/// client. rmcp's token record has no room for it.
+pub fn client_account_for(server: &str) -> Result<String, String> {
+    account_for(server)?;
+    Ok(format!("oauth-client.{server}"))
 }
 
 /// Keeps rmcp's token record as one JSON entry in the credential store.
@@ -127,10 +135,136 @@ pub fn is_logged_in(store: &dyn CredentialStore, server: &str) -> Result<bool, S
         .map_err(|err| err.to_string())
 }
 
-/// Removes a server's tokens. Returns `true` when there were some.
+/// Removes a server's login and its dynamic client record. Returns `true`
+/// when there was something. The record goes first, so a failure leaves the
+/// tokens (and a way to retry) in place.
 pub fn logout(store: &dyn CredentialStore, server: &str) -> Result<bool, String> {
     let account = account_for(server)?;
-    store.delete(&account).map_err(|err| err.to_string())
+    let client_account = client_account_for(server)?;
+    let had_client = store
+        .delete(&client_account)
+        .map_err(|err| err.to_string())?;
+    let had_tokens = store.delete(&account).map_err(|err| err.to_string())?;
+    Ok(had_tokens || had_client)
+}
+
+/// The client that `auth login` registered dynamically. It lives in its own
+/// account because rmcp's token record has no room for a client secret. It is
+/// written only after the tokens, so the two agree on `client_id`.
+#[derive(Serialize, Deserialize)]
+struct ClientRecord {
+    client_id: String,
+    client_secret: Option<String>,
+}
+
+impl std::fmt::Debug for ClientRecord {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ClientRecord")
+            .field("client_id", &self.client_id)
+            .field(
+                "client_secret",
+                &self.client_secret.as_ref().map(|_| "[REDACTED]"),
+            )
+            .finish()
+    }
+}
+
+/// Reads the record. Error text never contains it.
+fn read_client_record(
+    store: &dyn CredentialStore,
+    server: &str,
+) -> Result<Option<ClientRecord>, String> {
+    let account = client_account_for(server)?;
+    let Some(json) = store.get(&account).map_err(|err| err.to_string())? else {
+        return Ok(None);
+    };
+    serde_json::from_str(&json).map(Some).map_err(|_| {
+        "the stored OAuth client record is unreadable; run `toolward auth login` again".to_owned()
+    })
+}
+
+/// Like [`read_client_record`], but an unreadable record counts as absent,
+/// with a warning that holds no content.
+fn read_client_record_lenient(store: &dyn CredentialStore, server: &str) -> Option<ClientRecord> {
+    match read_client_record(store, server) {
+        Ok(record) => record,
+        Err(_) => {
+            eprintln!(
+                "toolward: ignoring the unreadable OAuth client record of {server:?}; run `toolward auth login {server}` if refreshing fails"
+            );
+            None
+        }
+    }
+}
+
+/// The record to keep after a dynamic registration. A public client has no
+/// secret, so nothing is kept.
+fn registration_record(client_id: String, client_secret: Option<String>) -> Option<ClientRecord> {
+    client_secret.map(|client_secret| ClientRecord {
+        client_id,
+        client_secret: Some(client_secret),
+    })
+}
+
+/// Stores the record, or removes it when `record` is `None`.
+fn write_client_record(
+    store: &dyn CredentialStore,
+    server: &str,
+    record: Option<&ClientRecord>,
+) -> Result<(), String> {
+    let account = client_account_for(server)?;
+    match record {
+        Some(record) => {
+            let json = serde_json::to_string(record)
+                .map_err(|_| "cannot encode the OAuth client record".to_owned())?;
+            store.set(&account, &json).map_err(|err| err.to_string())
+        }
+        None => store
+            .delete(&account)
+            .map(|_| ())
+            .map_err(|err| err.to_string()),
+    }
+}
+
+/// Picks the client secret for refreshing and lists what to mask. A configured
+/// secret wins. A stored one counts only for the client the tokens belong to.
+/// Every stored secret is masked, matching or not.
+fn resolve_client_secret(
+    configured: Option<String>,
+    record: Option<&ClientRecord>,
+    token_client_id: &str,
+) -> (Option<String>, Vec<String>) {
+    let mask: Vec<String> = record
+        .and_then(|r| r.client_secret.clone())
+        .into_iter()
+        .collect();
+    let used = configured.or_else(|| {
+        record
+            .filter(|r| r.client_id == token_client_id)
+            .and_then(|r| r.client_secret.clone())
+    });
+    (used, mask)
+}
+
+/// Scopes for registration and authorization, chosen as rmcp's own
+/// `AuthorizationSession::new` does: server-selected scopes when none are
+/// configured, else the configured ones plus `offline_access` when the server
+/// supports it.
+fn effective_scopes(
+    manager: &AuthorizationManager,
+    configured: &[String],
+    scopes_supported: Option<&[String]>,
+) -> Vec<String> {
+    if configured.is_empty() {
+        return manager.select_scopes(None, &[]);
+    }
+    let mut scopes = configured.to_vec();
+    if !scopes.iter().any(|s| s == "offline_access")
+        && scopes_supported.is_some_and(|supported| supported.iter().any(|s| s == "offline_access"))
+    {
+        scopes.push("offline_access".to_owned());
+    }
+    scopes
 }
 
 /// What `connect` needs for an OAuth server.
@@ -208,6 +342,21 @@ impl Connect for OAuthConnector {
                 }
                 None => None,
             };
+            // Only needed when the config gives no secret.
+            let record = if client_secret.is_some() {
+                None
+            } else {
+                let store = Arc::clone(&self.store);
+                let server = self.spec.server.clone();
+                tokio::task::spawn_blocking(move || {
+                    read_client_record_lenient(store.as_ref(), &server)
+                })
+                .await
+                .map_err(|err| err.to_string())?
+            };
+            let (client_secret, mask) =
+                resolve_client_secret(client_secret, record.as_ref(), &stored.client_id);
+            secrets.extend(mask);
 
             let mut manager = AuthorizationManager::new(self.spec.url.as_str())
                 .await
@@ -303,8 +452,7 @@ pub async fn login(
         }
         None => None,
     };
-    let secrets: Vec<String> = client_secret.iter().cloned().collect();
-    let fail = |err: AuthError| auth_failure(&err, &secrets);
+    let mut secrets: Vec<String> = client_secret.iter().cloned().collect();
 
     // Bind first: the redirect URI must be known before registration.
     let port = request.oauth.callback_port.unwrap_or(0);
@@ -314,20 +462,45 @@ pub async fn login(
     let port = listener.local_addr().map_err(|err| err.to_string())?.port();
     let redirect_uri = format!("http://127.0.0.1:{port}/callback");
 
-    let mut manager = AuthorizationManager::new(request.url).await.map_err(fail)?;
-    manager.set_credential_store(TokenStore::new(store, account));
-    let metadata = manager.resolve_metadata().await.map_err(fail)?.metadata;
+    let mut manager = AuthorizationManager::new(request.url)
+        .await
+        .map_err(|err| auth_failure(&err, &secrets))?;
+    manager.set_credential_store(TokenStore::new(Arc::clone(&store), account));
+    let metadata = manager
+        .resolve_metadata()
+        .await
+        .map_err(|err| auth_failure(&err, &secrets))?
+        .metadata;
+    let scopes_supported = metadata.scopes_supported.clone();
     manager.set_metadata(metadata);
+    let scopes = effective_scopes(&manager, &request.oauth.scopes, scopes_supported.as_deref());
 
-    let mut auth_request = AuthorizationRequest::new(redirect_uri)
-        .with_scopes(request.oauth.scopes.clone())
+    let mut auth_request = AuthorizationRequest::new(redirect_uri.clone())
+        .with_scopes(scopes.clone())
         .with_client_name("toolward");
+    // The client secret `serve` must use, when the server issued one.
+    let mut registered = None;
     if let Some(id) = client_id {
         auth_request = auth_request.with_preregistered_client(id);
         if let Some(secret) = client_secret.clone() {
             auth_request = auth_request.with_client_secret(secret);
         }
+    } else {
+        // Register here instead of inside the session: the session drops the
+        // client secret that the server returns.
+        let scope_refs: Vec<&str> = scopes.iter().map(String::as_str).collect();
+        let config = manager
+            .register_client("toolward", &redirect_uri, &scope_refs)
+            .await
+            .map_err(|err| auth_failure(&err, &secrets))?;
+        if let Some(secret) = config.client_secret.clone() {
+            secrets.push(secret.clone());
+            auth_request = auth_request.with_client_secret(secret);
+        }
+        auth_request = auth_request.with_preregistered_client(config.client_id.clone());
+        registered = registration_record(config.client_id, config.client_secret);
     }
+    let fail = |err: AuthError| auth_failure(&err, &secrets);
     let session = AuthorizationSession::new(manager, auth_request)
         .await
         .map_err(|(_, err)| fail(err))?;
@@ -352,11 +525,20 @@ pub async fn login(
     let callback = tokio::time::timeout(timeout, wait_for_callback(&listener, port, &state))
         .await
         .map_err(|_| format!("no authorization within {} seconds", timeout.as_secs()))??;
-    session
-        .handle_callback_url(&callback)
-        .await
-        .map_err(fail)
-        .map(|_| ())
+    session.handle_callback_url(&callback).await.map_err(fail)?;
+    // Only now, with the new tokens saved, may the client record change.
+    let server = request.server.to_owned();
+    tokio::task::spawn_blocking(move || {
+        write_client_record(store.as_ref(), &server, registered.as_ref())
+    })
+    .await
+    .map_err(|err| err.to_string())?
+    .map_err(|_| {
+        format!(
+            "the tokens were saved, but the OAuth client record could not be written: run `toolward auth login {}` again",
+            request.server
+        )
+    })
 }
 
 /// Opens the system browser. Failure is fine: the URL is printed as well.
@@ -527,6 +709,141 @@ mod tests {
         assert!(is_logged_in(&store, "sentry").unwrap());
         assert!(logout(&store, "sentry").unwrap());
         assert!(!logout(&store, "sentry").unwrap());
+    }
+
+    #[test]
+    fn client_account_names() {
+        assert_eq!(client_account_for("sentry").unwrap(), "oauth-client.sentry");
+        assert!(client_account_for("a/b").is_err());
+        assert!(crate::store::validate_user_account("oauth-client.sentry").is_err());
+    }
+
+    fn record(id: &str, secret: Option<&str>) -> ClientRecord {
+        ClientRecord {
+            client_id: id.into(),
+            client_secret: secret.map(Into::into),
+        }
+    }
+
+    #[test]
+    fn logout_removes_tokens_and_client_record() {
+        let store = MemoryStore::new();
+        store.set("oauth.sentry", "{}").unwrap();
+        store.set("oauth-client.sentry", "{}").unwrap();
+        store.set("oauth-client.other", "{}").unwrap();
+        assert!(logout(&store, "sentry").unwrap());
+        assert!(store.get("oauth.sentry").unwrap().is_none());
+        assert!(store.get("oauth-client.sentry").unwrap().is_none());
+        assert!(store.get("oauth-client.other").unwrap().is_some());
+        store.set("oauth-client.sentry", "{}").unwrap();
+        assert!(logout(&store, "sentry").unwrap());
+        assert!(!logout(&store, "sentry").unwrap());
+    }
+
+    /// A store whose deletes of one account fail.
+    struct FailingDelete(MemoryStore, &'static str);
+
+    impl CredentialStore for FailingDelete {
+        fn get(&self, account: &str) -> Result<Option<String>, crate::store::StoreError> {
+            self.0.get(account)
+        }
+        fn set(&self, account: &str, secret: &str) -> Result<(), crate::store::StoreError> {
+            self.0.set(account, secret)
+        }
+        fn delete(&self, account: &str) -> Result<bool, crate::store::StoreError> {
+            if account == self.1 {
+                Err(crate::store::StoreError::Backend("boom".into()))
+            } else {
+                self.0.delete(account)
+            }
+        }
+    }
+
+    #[test]
+    fn failed_record_delete_keeps_the_tokens() {
+        let store = FailingDelete(MemoryStore::new(), "oauth-client.sentry");
+        store.set("oauth.sentry", "{}").unwrap();
+        store.set("oauth-client.sentry", "{}").unwrap();
+        assert!(logout(&store, "sentry").is_err());
+        assert!(store.get("oauth.sentry").unwrap().is_some());
+    }
+
+    #[test]
+    fn client_record_round_trip_hides_secret_in_errors_and_debug() {
+        let store = MemoryStore::new();
+        assert!(read_client_record(&store, "sentry").unwrap().is_none());
+        let rec = record("c1", Some("CS-fake"));
+        assert!(!format!("{rec:?}").contains("CS-fake"));
+        write_client_record(&store, "sentry", Some(&rec)).unwrap();
+        let read = read_client_record(&store, "sentry").unwrap().unwrap();
+        assert_eq!(read.client_id, "c1");
+        assert_eq!(read.client_secret.as_deref(), Some("CS-fake"));
+        write_client_record(&store, "sentry", Some(&record("c2", None))).unwrap();
+        let read = read_client_record(&store, "sentry").unwrap().unwrap();
+        assert_eq!((read.client_id.as_str(), read.client_secret), ("c2", None));
+        // Switching to a configured clientId removes the record.
+        write_client_record(&store, "sentry", None).unwrap();
+        assert!(read_client_record(&store, "sentry").unwrap().is_none());
+        // Valid JSON of the wrong type: serde would quote the value.
+        store
+            .set(
+                "oauth-client.sentry",
+                r#"{"client_id":"c1","client_secret":987654321}"#,
+            )
+            .unwrap();
+        let err = read_client_record(&store, "sentry").unwrap_err();
+        assert!(!err.contains("987654321"), "{err}");
+    }
+
+    #[test]
+    fn unreadable_record_is_ignored_by_the_lenient_reader() {
+        let store = MemoryStore::new();
+        store
+            .set("oauth-client.sentry", "not json CS-JUNK")
+            .unwrap();
+        assert!(read_client_record_lenient(&store, "sentry").is_none());
+        write_client_record(&store, "sentry", Some(&record("c1", Some("CS-fake")))).unwrap();
+        assert!(read_client_record_lenient(&store, "sentry").is_some());
+    }
+
+    #[test]
+    fn public_client_registration_keeps_no_record() {
+        assert!(registration_record("c1".into(), None).is_none());
+        let kept = registration_record("c1".into(), Some("CS-fake".into())).unwrap();
+        assert_eq!(kept.client_secret.as_deref(), Some("CS-fake"));
+        // `None` clears an older record on a successful login.
+        let store = MemoryStore::new();
+        write_client_record(&store, "sentry", Some(&record("old", Some("CS-old")))).unwrap();
+        write_client_record(
+            &store,
+            "sentry",
+            registration_record("c1".into(), None).as_ref(),
+        )
+        .unwrap();
+        assert!(store.get("oauth-client.sentry").unwrap().is_none());
+    }
+
+    #[test]
+    fn stored_secret_is_used_only_for_the_matching_client() {
+        let rec = record("c1", Some("CS-fake"));
+        let (used, mask) = resolve_client_secret(None, Some(&rec), "c1");
+        assert_eq!(used.as_deref(), Some("CS-fake"));
+        assert_eq!(mask, ["CS-fake"]);
+        let (used, mask) = resolve_client_secret(None, Some(&rec), "other");
+        assert_eq!(used, None);
+        assert_eq!(mask, ["CS-fake"], "still masked");
+        let (used, mask) = resolve_client_secret(None, None, "c1");
+        assert_eq!((used, mask.len()), (None, 0));
+        let public = record("c1", None);
+        assert_eq!(resolve_client_secret(None, Some(&public), "c1").0, None);
+    }
+
+    #[test]
+    fn configured_secret_wins_over_the_stored_one() {
+        let rec = record("c1", Some("CS-stored"));
+        let (used, mask) = resolve_client_secret(Some("CS-config".into()), Some(&rec), "c1");
+        assert_eq!(used.as_deref(), Some("CS-config"));
+        assert_eq!(mask, ["CS-stored"]);
     }
 
     async fn get(port: u16, target: &str) -> String {

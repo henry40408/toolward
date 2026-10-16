@@ -14,7 +14,9 @@ pub const SERVICE: &str = "toolward";
 pub enum StoreError {
     #[error("invalid account name {0:?}: use only ASCII letters, digits, '.', '_' and '-'")]
     InvalidAccount(String),
-    #[error("account names starting with \"oauth.\" are reserved for OAuth logins: {0:?}")]
+    #[error(
+        "account names starting with \"oauth.\" or \"oauth-client.\" are reserved for OAuth logins: {0:?}"
+    )]
     Reserved(String),
     #[error("credential store failure: {0}")]
     Backend(String),
@@ -35,11 +37,15 @@ pub fn validate_account(account: &str) -> Result<(), StoreError> {
     }
 }
 
-/// Like [`validate_account`], for names a user picks: `oauth.` is reserved for
-/// the tokens that `toolward auth login` stores.
+/// Account prefixes that only `toolward auth login` may write: the tokens
+/// (`oauth.`) and a dynamically registered client secret (`oauth-client.`).
+pub const RESERVED_PREFIXES: [&str; 2] = ["oauth.", "oauth-client."];
+
+/// Like [`validate_account`], for names a user picks: the reserved prefixes
+/// are for what `toolward auth login` stores.
 pub fn validate_user_account(account: &str) -> Result<(), StoreError> {
     validate_account(account)?;
-    if account.starts_with("oauth.") {
+    if RESERVED_PREFIXES.iter().any(|p| account.starts_with(p)) {
         return Err(StoreError::Reserved(account.to_owned()));
     }
     Ok(())
@@ -393,6 +399,8 @@ mod tests {
     #[test]
     fn oauth_accounts_are_reserved_for_logins() {
         assert!(validate_user_account("oauth.sentry").is_err());
+        assert!(validate_user_account("oauth-client.sentry").is_err());
+        assert!(validate_account("oauth-client.sentry").is_ok());
         assert!(validate_user_account("github").is_ok());
         assert!(validate_account("oauth.sentry").is_ok());
     }
