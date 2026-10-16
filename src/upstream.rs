@@ -678,7 +678,11 @@ impl Upstream {
     /// Lists the tools under the names the agent sees (without the
     /// `<server>__` prefix) and remembers how to map them back.
     pub async fn tools(&self) -> Result<Vec<Tool>, String> {
-        let peer = self.peer().await?;
+        let peer = self.list_peer().await?;
+        self.tools_from(&peer).await
+    }
+
+    async fn tools_from(&self, peer: &Peer<RoleClient>) -> Result<Vec<Tool>, String> {
         let mut tools = self.bounded(peer.list_all_tools()).await?;
         let originals: Vec<String> = tools.iter().map(|t| t.name.to_string()).collect();
         let assignment = names::assign(&self.name, &originals);
@@ -753,10 +757,45 @@ impl Upstream {
                 }
             }
             if attempt == 0 {
-                self.tools().await?;
+                // A tool call may wait for a slow start as long as any other
+                // call; only a plain listing gives up early.
+                let peer = self.peer().await?;
+                self.tools_from(&peer).await?;
             }
         }
         Ok(None)
+    }
+
+    /// Like [`Upstream::peer`], for a `list` request: connecting may take no
+    /// longer than the list timeout, so one hung upstream cannot hold up the
+    /// whole listing. A connection that times out counts as a failure and is
+    /// not tried again for [`RETRY_AFTER`].
+    pub async fn list_peer(&self) -> Result<Peer<RoleClient>, String> {
+        match tokio::time::timeout(self.list_timeout, self.peer()).await {
+            Ok(result) => result,
+            Err(_) => {
+                let reason = format!("no connection within {}s", self.list_timeout.as_secs_f32());
+                // Another request that is still connecting holds the lock;
+                // it will record its own outcome.
+                if let Ok(mut state) = self.state.try_lock()
+                    && match &*state {
+                        State::Idle => true,
+                        State::Failed { at, .. } => at.elapsed() >= RETRY_AFTER,
+                        // A connection that died on its own, then hung on reconnect.
+                        State::Running(client) => {
+                            client.is_closed() || client.peer().is_transport_closed()
+                        }
+                        State::Closed => false,
+                    }
+                {
+                    *state = State::Failed {
+                        at: Instant::now(),
+                        reason: reason.clone(),
+                    };
+                }
+                Err(reason)
+            }
+        }
     }
 
     /// Returns a handle to the live connection, connecting first when needed.
@@ -861,6 +900,32 @@ mod tests {
         assert_eq!(out["b"][1], "q=[REDACTED]");
         // Too short to mask without hitting ordinary text.
         assert_eq!(out["b"][2], "abc stays");
+    }
+
+    struct Hang;
+
+    impl Connect for Hang {
+        fn connect(
+            &self,
+            _handler: UpstreamHandler,
+        ) -> BoxFuture<'_, Result<RunningClient, String>> {
+            Box::pin(std::future::pending())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_hung_connection_ends_a_listing_and_is_not_retried_at_once() {
+        let upstream =
+            Upstream::new("hang", Box::new(Hang)).with_list_timeout(Duration::from_millis(100));
+        let started = Instant::now();
+        let err = upstream.list_peer().await.unwrap_err();
+        assert!(err.contains("no connection"), "{err}");
+        assert!(started.elapsed() < Duration::from_secs(5));
+        // The failure is remembered: the next request answers at once.
+        let started = Instant::now();
+        let again = upstream.list_peer().await.unwrap_err();
+        assert_eq!(again, err);
+        assert!(started.elapsed() < Duration::from_millis(50));
     }
 
     #[test]

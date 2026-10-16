@@ -336,7 +336,7 @@ impl ServerHandler for Proxy {
         for upstream in self.upstreams.values() {
             let upstream = Arc::clone(upstream);
             tasks.spawn(async move {
-                let resources = match upstream.peer().await {
+                let resources = match upstream.list_peer().await {
                     Ok(peer) if !supports(&peer, Capability::Resources) => Ok(Vec::new()),
                     Ok(peer) => upstream
                         .bounded(peer.list_all_resources())
@@ -406,7 +406,7 @@ impl ServerHandler for Proxy {
         for upstream in self.upstreams.values() {
             let upstream = Arc::clone(upstream);
             tasks.spawn(async move {
-                let prompts = match upstream.peer().await {
+                let prompts = match upstream.list_peer().await {
                     Ok(peer) if !supports(&peer, Capability::Prompts) => Ok(Vec::new()),
                     Ok(peer) => upstream
                         .bounded(peer.list_all_prompts())

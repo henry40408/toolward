@@ -506,3 +506,77 @@ async fn the_handshake_offers_a_version_that_has_initialize() {
     // rmcp's default, 2026-07-28, has no initialize; GitHub's server rejects it.
     assert_eq!(*fake.versions.lock().unwrap(), ["2025-11-25"]);
 }
+
+/// A server that accepts connections and never answers.
+async fn serve_silent() -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/mcp", listener.local_addr().unwrap());
+    tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Ok((stream, _)) = listener.accept().await {
+            held.push(stream);
+        }
+    });
+    url
+}
+
+/// A fresh harness with one silent and one working upstream, so each listing
+/// meets the silent one for the first time.
+async fn with_silent_upstream() -> Harness {
+    let silent = serve_silent().await;
+    let fast = serve_fake(fake_with_tools(&["ping"])).await;
+    let store: Arc<dyn CredentialStore> = Arc::new(MemoryStore::new());
+    let hung = http_upstream("hung", &silent, &[], &store)
+        .with_list_timeout(std::time::Duration::from_millis(500));
+    start(vec![hung, http_upstream("fast", &fast, &[], &store)]).await
+}
+
+#[tokio::test]
+async fn a_silent_upstream_does_not_hold_up_any_listing() {
+    let limit = std::time::Duration::from_secs(10);
+
+    let h = with_silent_upstream().await;
+    let started = std::time::Instant::now();
+    let tools = h.client.peer().list_all_tools().await.unwrap();
+    assert!(started.elapsed() < limit);
+    assert_eq!(tools.len(), 1);
+    assert!(tools.iter().all(|t| t.name.starts_with("fast__")));
+
+    let h = with_silent_upstream().await;
+    let started = std::time::Instant::now();
+    let resources = h.client.peer().list_all_resources().await.unwrap();
+    assert!(started.elapsed() < limit);
+    assert_eq!(resources.len(), 1);
+    assert!(
+        resources
+            .iter()
+            .all(|r| r.uri.starts_with("toolward://fast/"))
+    );
+
+    let h = with_silent_upstream().await;
+    let started = std::time::Instant::now();
+    let prompts = h.client.peer().list_all_prompts().await.unwrap();
+    assert!(started.elapsed() < limit);
+    assert_eq!(prompts.len(), 1);
+    assert!(prompts.iter().all(|p| p.name.starts_with("fast__")));
+}
+
+#[tokio::test]
+async fn check_tools_lists_exposed_names_and_flags_failures() {
+    let fast = serve_fake(fake_with_tools(&["ping", LONG_TOOL])).await;
+    let store: Arc<dyn CredentialStore> = Arc::new(MemoryStore::new());
+    let proxy = Proxy::new(vec![
+        http_upstream("down", "http://127.0.0.1:1/mcp", &[], &store),
+        http_upstream("fast", &fast, &[], &store),
+    ]);
+    let mut out = Vec::new();
+    let all_listed = toolward::cli::check_tools(&proxy, &mut out).await.unwrap();
+    let text = String::from_utf8(out).unwrap();
+    assert!(!all_listed);
+    assert!(text.contains("fast__ping"), "{text}");
+    assert!(
+        text.contains(&format!("(renamed from {LONG_TOOL:?})")),
+        "{text}"
+    );
+    assert!(text.contains("ERROR"), "{text}");
+}
