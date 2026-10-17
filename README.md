@@ -1,5 +1,12 @@
 # toolward
 
+[![CI](https://github.com/henry40408/toolward/actions/workflows/ci.yml/badge.svg)](https://github.com/henry40408/toolward/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/henry40408/toolward)](https://github.com/henry40408/toolward/releases/latest)
+[![License](https://img.shields.io/github/license/henry40408/toolward)](LICENSE.txt)
+[![Rust toolchain](https://img.shields.io/badge/dynamic/toml?url=https://raw.githubusercontent.com/henry40408/toolward/main/rust-toolchain.toml&query=$.toolchain.channel&label=rust%20toolchain&logo=rust)](https://www.rust-lang.org/)
+[![Casual Maintenance Intended](https://casuallymaintained.tech/badge.svg)](https://casuallymaintained.tech/)
+[![Vibe Coded](https://img.shields.io/badge/vibe_coded-Claude-d97757?logo=anthropic&logoColor=white)](https://claude.com/claude-code)
+
 An MCP proxy that keeps credentials out of agent-readable files.
 
 Coding agents read `mcp.json`, and a model that is too helpful will read a token from it into the conversation. toolward is a single stdio MCP server for the agent. It starts your real MCP servers behind it, and it keeps their credentials in the OS credential store (macOS Keychain), never in a file the agent can open.
