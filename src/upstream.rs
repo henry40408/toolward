@@ -116,7 +116,7 @@ impl ClientHandler for UpstreamHandler {
     fn get_info(&self) -> ClientConfig {
         let mut info = ClientConfig::default();
         info.protocol_version = ProtocolVersion::LATEST_WITH_INITIALIZE;
-        info.client_info = Implementation::new("toolward", env!("CARGO_PKG_VERSION"));
+        info.client_info = Implementation::new("toolward", env!("GIT_VERSION"));
         info
     }
 

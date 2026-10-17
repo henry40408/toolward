@@ -243,7 +243,7 @@ impl ServerHandler for Proxy {
                 .enable_prompts_list_changed()
                 .build(),
         )
-        .with_server_info(Implementation::new("toolward", env!("CARGO_PKG_VERSION")))
+        .with_server_info(Implementation::new("toolward", env!("GIT_VERSION")))
     }
 
     async fn on_initialized(&self, context: NotificationContext<RoleServer>) {

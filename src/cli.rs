@@ -11,7 +11,7 @@ use crate::proxy::Proxy;
 use crate::store::{CredentialStore, validate_user_account};
 
 #[derive(Debug, Parser)]
-#[command(version, about)]
+#[command(version = env!("GIT_VERSION"), about)]
 pub struct Cli {
     /// Config file [default: ~/.config/toolward/config.json]
     #[arg(long, global = true, value_name = "PATH")]
