@@ -110,21 +110,24 @@ pub fn check(config: &Config, store: &dyn CredentialStore, out: &mut dyn Write) 
             writeln!(out, "  (no secret references)")?;
         }
         if let Some(oauth) = config.oauth_servers().find(|name| *name == server) {
-            let status = match oauth::is_logged_in(store, oauth) {
-                Ok(true) => "logged in".to_owned(),
-                Ok(false) => format!("NOT LOGGED IN (run `toolward auth login {server}`)"),
-                Err(err) => format!("ERROR ({err})"),
+            let (is_present, status) = match oauth::is_logged_in(store, oauth) {
+                Ok(true) => (true, "logged in".to_owned()),
+                Ok(false) => (
+                    false,
+                    format!("NOT LOGGED IN (run `toolward auth login {server}`)"),
+                ),
+                Err(err) => (false, format!("ERROR ({err})")),
             };
-            all_present &= status == "logged in";
+            all_present &= is_present;
             writeln!(out, "  oauth: {status}")?;
         }
         for account in accounts {
-            let status = match store.get(&account) {
-                Ok(Some(_)) => "ok".to_owned(),
-                Ok(None) => "MISSING".to_owned(),
-                Err(err) => format!("ERROR ({err})"),
+            let (is_present, status) = match store.get(&account) {
+                Ok(Some(_)) => (true, "ok".to_owned()),
+                Ok(None) => (false, "MISSING".to_owned()),
+                Err(err) => (false, format!("ERROR ({err})")),
             };
-            all_present &= status == "ok";
+            all_present &= is_present;
             writeln!(out, "  {account}: {status}")?;
         }
     }

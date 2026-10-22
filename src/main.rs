@@ -33,6 +33,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
     let mut out = io::stdout().lock();
     match &cli.command {
         Command::Secret(SecretCommand::Set { account }) => {
+            // Fail before prompting, so the user does not type a secret for a rejected name.
             validate_user_account(account)?;
             let store = KeyringStore::native()?;
             let secret = cli::read_secret(account)?;
