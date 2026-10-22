@@ -943,14 +943,14 @@ mod tests {
 
     #[tokio::test]
     async fn without_tokens_the_upstream_says_how_to_log_in() {
-        use crate::upstream::Upstream;
+        use crate::upstream::{Hub, Upstream};
         let spec = OAuthSpec {
             server: "sentry".into(),
             url: "http://127.0.0.1:9/mcp".into(),
             client_secret: None,
         };
         let connector = OAuthConnector::new(spec, Arc::new(MemoryStore::new()));
-        let upstream = Upstream::new("sentry", Box::new(connector));
+        let upstream = Upstream::new("sentry", Box::new(connector), Arc::new(Hub::default()));
         let err = upstream.tools().await.unwrap_err();
         assert!(err.contains("toolward auth login sentry"), "{err}");
     }

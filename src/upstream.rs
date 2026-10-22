@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::pin::Pin;
 use std::process::Stdio;
-use std::sync::{Arc, Mutex as StdMutex, OnceLock};
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
 use http::{HeaderName, HeaderValue};
@@ -74,7 +74,7 @@ struct ToolMap {
 struct Shared {
     /// Secret values substituted into the connection, for redaction.
     secrets: StdMutex<Vec<String>>,
-    hub: OnceLock<Arc<Hub>>,
+    hub: Arc<Hub>,
     tools: StdMutex<Option<ToolMap>>,
 }
 
@@ -84,7 +84,7 @@ impl Shared {
     }
 
     fn downstream(&self) -> Option<Peer<RoleServer>> {
-        self.hub.get().and_then(|hub| hub.downstream())
+        self.hub.downstream()
     }
 }
 
@@ -659,7 +659,7 @@ pub struct Upstream {
 }
 
 impl Upstream {
-    pub fn new(name: impl Into<String>, connector: Box<dyn Connect>) -> Self {
+    pub fn new(name: impl Into<String>, connector: Box<dyn Connect>, hub: Arc<Hub>) -> Self {
         Self {
             name: name.into(),
             connector,
@@ -667,7 +667,7 @@ impl Upstream {
             list_timeout: LIST_TIMEOUT,
             shared: Arc::new(Shared {
                 secrets: StdMutex::new(Vec::new()),
-                hub: OnceLock::new(),
+                hub,
                 tools: StdMutex::new(None),
             }),
         }
@@ -710,11 +710,6 @@ impl Upstream {
     {
         let secrets = self.shared.secrets.lock().unwrap().clone();
         redact_value(value, &secrets)
-    }
-
-    /// Lets notifications from this upstream reach the agent.
-    pub fn attach(&self, hub: Arc<Hub>) {
-        let _ = self.shared.hub.set(hub);
     }
 
     /// Lists the tools under the names the agent sees (without the
@@ -957,8 +952,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_hung_connection_ends_a_listing_and_is_not_retried_at_once() {
-        let upstream =
-            Upstream::new("hang", Box::new(Hang)).with_list_timeout(Duration::from_millis(100));
+        let upstream = Upstream::new("hang", Box::new(Hang), Arc::new(Hub::default()))
+            .with_list_timeout(Duration::from_millis(100));
         let started = Instant::now();
         let err = upstream.list_peer().await.unwrap_err();
         assert!(err.contains("no connection"), "{err}");
