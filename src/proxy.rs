@@ -9,9 +9,9 @@ use rmcp::handler::server::ServerHandler;
 use rmcp::model::{
     CallToolRequest, CallToolRequestParams, CallToolResponse, ClientRequest,
     GetPromptRequestParams, GetPromptResponse, Implementation, ListPromptsResult,
-    ListResourcesResult, ListToolsResult, PaginatedRequestParams, ReadResourceRequestParams,
-    ReadResourceResponse, ResourceContents, ResultType, ServerCapabilities, ServerConfig,
-    ServerResult,
+    ListResourceTemplatesResult, ListResourcesResult, ListToolsResult, PaginatedRequestParams,
+    ReadResourceRequestParams, ReadResourceResponse, ResourceContents, ResultType,
+    ServerCapabilities, ServerConfig, ServerResult,
 };
 use rmcp::service::{
     NotificationContext, Peer, PeerRequestOptions, RequestContext, RoleClient, RoleServer,
@@ -19,6 +19,7 @@ use rmcp::service::{
 };
 use tokio::task::JoinSet;
 
+use crate::cache::{self, CacheHint, weakest_of};
 use crate::config::{Config, Transport};
 use crate::names::SEPARATOR;
 use crate::oauth::{OAuthConnector, OAuthSpec};
@@ -219,6 +220,7 @@ fn supports(peer: &rmcp::service::Peer<rmcp::service::RoleClient>, capability: C
         return true;
     };
     match capability {
+        Capability::Tools => info.capabilities.tools.is_some(),
         Capability::Resources => info.capabilities.resources.is_some(),
         Capability::Prompts => info.capabilities.prompts.is_some(),
     }
@@ -226,6 +228,7 @@ fn supports(peer: &rmcp::service::Peer<rmcp::service::RoleClient>, capability: C
 
 #[derive(Clone, Copy)]
 enum Capability {
+    Tools,
     Resources,
     Prompts,
 }
@@ -258,30 +261,50 @@ impl ServerHandler for Proxy {
         for upstream in self.upstreams.values() {
             let upstream = Arc::clone(upstream);
             tasks.spawn(async move {
-                let tools = upstream
-                    .tools()
-                    .await
-                    .and_then(|list| upstream.redact_result(list));
+                let tools = match upstream.list_peer().await {
+                    Ok(peer) if !supports(&peer, Capability::Tools) => Ok(None),
+                    Ok(_) => upstream
+                        .tools()
+                        .await
+                        .and_then(|list| upstream.redact_listed(list))
+                        .map(Some),
+                    Err(reason) => Err(reason),
+                };
                 (upstream.name().to_owned(), tools)
             });
         }
         let mut tools = Vec::new();
+        let mut hints = Vec::new();
         while let Some(joined) = tasks.join_next().await {
-            let Ok((name, result)) = joined else { continue };
+            let Ok((name, result)) = joined else {
+                hints.push(CacheHint::UNCACHEABLE);
+                continue;
+            };
             match result {
-                Ok(list) => tools.extend(list.into_iter().map(|mut tool| {
-                    tool.name = format!("{name}{SEPARATOR}{}", tool.name).into();
-                    tool
-                })),
-                // An unavailable upstream is skipped, not fatal.
-                Err(reason) => log(format!("skipping upstream {name:?}: {reason}")),
+                Ok(Some(list)) => {
+                    hints.push(list.hint);
+                    tools.extend(list.items.into_iter().map(|mut tool| {
+                        tool.name = format!("{name}{SEPARATOR}{}", tool.name).into();
+                        tool
+                    }));
+                }
+                Ok(None) => {}
+                // An unavailable upstream is skipped, not fatal. The list is
+                // then incomplete, so the agent must not keep it.
+                Err(reason) => {
+                    hints.push(CacheHint::UNCACHEABLE);
+                    log(format!("skipping upstream {name:?}: {reason}"));
+                }
             }
         }
         tools.sort_by(|a, b| a.name.cmp(&b.name));
+        let hint = weakest_of(hints);
         Ok(ListToolsResult {
             tools,
             ..Default::default()
-        })
+        }
+        .with_ttl_ms(hint.ttl_ms)
+        .with_cache_scope(hint.scope))
     }
 
     async fn call_tool(
@@ -337,32 +360,60 @@ impl ServerHandler for Proxy {
             let upstream = Arc::clone(upstream);
             tasks.spawn(async move {
                 let resources = match upstream.list_peer().await {
-                    Ok(peer) if !supports(&peer, Capability::Resources) => Ok(Vec::new()),
+                    Ok(peer) if !supports(&peer, Capability::Resources) => Ok(None),
                     Ok(peer) => upstream
-                        .bounded(peer.list_all_resources())
+                        .bounded(cache::list_resources(&peer))
                         .await
-                        .and_then(|list| upstream.redact_result(list)),
+                        .and_then(|list| upstream.redact_listed(list))
+                        .map(Some),
                     Err(reason) => Err(reason),
                 };
                 (upstream.name().to_owned(), resources)
             });
         }
         let mut resources = Vec::new();
+        let mut hints = Vec::new();
         while let Some(joined) = tasks.join_next().await {
-            let Ok((name, result)) = joined else { continue };
+            let Ok((name, result)) = joined else {
+                hints.push(CacheHint::UNCACHEABLE);
+                continue;
+            };
             match result {
-                Ok(list) => resources.extend(list.into_iter().map(|mut resource| {
-                    resource.uri = expose_uri(&name, &resource.uri);
-                    resource
-                })),
-                Err(reason) => log(format!("skipping upstream {name:?}: {reason}")),
+                Ok(Some(list)) => {
+                    hints.push(list.hint);
+                    resources.extend(list.items.into_iter().map(|mut resource| {
+                        resource.uri = expose_uri(&name, &resource.uri);
+                        resource
+                    }));
+                }
+                // Nothing to list, so nothing to keep fresh either.
+                Ok(None) => {}
+                Err(reason) => {
+                    hints.push(CacheHint::UNCACHEABLE);
+                    log(format!("skipping upstream {name:?}: {reason}"));
+                }
             }
         }
         resources.sort_by(|a, b| a.uri.cmp(&b.uri));
+        let hint = weakest_of(hints);
         Ok(ListResourcesResult {
             resources,
             ..Default::default()
-        })
+        }
+        .with_ttl_ms(hint.ttl_ms)
+        .with_cache_scope(hint.scope))
+    }
+
+    /// Templates are not exposed. The empty list is complete and never changes.
+    async fn list_resource_templates(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListResourceTemplatesResult, McpError> {
+        let hint = CacheHint::UNCACHEABLE;
+        Ok(ListResourceTemplatesResult::default()
+            .with_ttl_ms(hint.ttl_ms)
+            .with_cache_scope(hint.scope))
     }
 
     async fn read_resource(
@@ -385,6 +436,11 @@ impl ServerHandler for Proxy {
             .map_err(|err| service_error(upstream, err))?;
         let mut result = upstream.redact_result(result).map_err(internal_failure)?;
         result.result_type.get_or_insert(ResultType::COMPLETE);
+        // The upstream's hints pass through as they are. A server older than
+        // 2026-07-28 gave none, and the agent needs them.
+        let hint = CacheHint::of_result(result.ttl_ms, result.cache_scope);
+        result.ttl_ms = Some(hint.ttl_ms);
+        result.cache_scope = Some(hint.scope);
         for content in &mut result.contents {
             match content {
                 ResourceContents::TextResourceContents { uri, .. }
@@ -407,32 +463,47 @@ impl ServerHandler for Proxy {
             let upstream = Arc::clone(upstream);
             tasks.spawn(async move {
                 let prompts = match upstream.list_peer().await {
-                    Ok(peer) if !supports(&peer, Capability::Prompts) => Ok(Vec::new()),
+                    Ok(peer) if !supports(&peer, Capability::Prompts) => Ok(None),
                     Ok(peer) => upstream
-                        .bounded(peer.list_all_prompts())
+                        .bounded(cache::list_prompts(&peer))
                         .await
-                        .and_then(|list| upstream.redact_result(list)),
+                        .and_then(|list| upstream.redact_listed(list))
+                        .map(Some),
                     Err(reason) => Err(reason),
                 };
                 (upstream.name().to_owned(), prompts)
             });
         }
         let mut prompts = Vec::new();
+        let mut hints = Vec::new();
         while let Some(joined) = tasks.join_next().await {
-            let Ok((name, result)) = joined else { continue };
+            let Ok((name, result)) = joined else {
+                hints.push(CacheHint::UNCACHEABLE);
+                continue;
+            };
             match result {
-                Ok(list) => prompts.extend(list.into_iter().map(|mut prompt| {
-                    prompt.name = format!("{name}{SEPARATOR}{}", prompt.name);
-                    prompt
-                })),
-                Err(reason) => log(format!("skipping upstream {name:?}: {reason}")),
+                Ok(Some(list)) => {
+                    hints.push(list.hint);
+                    prompts.extend(list.items.into_iter().map(|mut prompt| {
+                        prompt.name = format!("{name}{SEPARATOR}{}", prompt.name);
+                        prompt
+                    }));
+                }
+                Ok(None) => {}
+                Err(reason) => {
+                    hints.push(CacheHint::UNCACHEABLE);
+                    log(format!("skipping upstream {name:?}: {reason}"));
+                }
             }
         }
         prompts.sort_by(|a, b| a.name.cmp(&b.name));
+        let hint = weakest_of(hints);
         Ok(ListPromptsResult {
             prompts,
             ..Default::default()
-        })
+        }
+        .with_ttl_ms(hint.ttl_ms)
+        .with_cache_scope(hint.scope))
     }
 
     async fn get_prompt(

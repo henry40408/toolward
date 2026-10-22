@@ -3,11 +3,15 @@
 //! Tools: `echo` returns its `text`, `env` returns the value of the environment
 //! variable `name`, `fail` returns a tool-level error, `die` exits the process, `hang`
 //! waits for cancellation and then writes the file named by `marker`.
+//!
+//! `FAKE_TTL_MS` and `FAKE_CACHE_SCOPE` (`public` or `private`) set the caching
+//! hints of the tool list. Without them the list carries none. `FAKE_NO_TOOLS`
+//! makes it announce prompts only, and refuse `tools/list`.
 
 use rmcp::handler::server::ServerHandler;
 use rmcp::model::{
-    CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, ListToolsResult,
-    PaginatedRequestParams, ServerCapabilities, ServerConfig, Tool,
+    CacheScope, CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock,
+    ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerConfig, Tool,
 };
 use rmcp::service::{RequestContext, RoleServer};
 use rmcp::{ErrorData as McpError, ServiceExt};
@@ -27,7 +31,12 @@ fn schema(property: &str) -> serde_json::Map<String, serde_json::Value> {
 
 impl ServerHandler for Fake {
     fn get_info(&self) -> ServerConfig {
-        ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
+        let capabilities = if std::env::var("FAKE_NO_TOOLS").is_ok() {
+            ServerCapabilities::builder().enable_prompts().build()
+        } else {
+            ServerCapabilities::builder().enable_tools().build()
+        };
+        ServerConfig::new(capabilities)
     }
 
     async fn list_tools(
@@ -35,6 +44,11 @@ impl ServerHandler for Fake {
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
+        if std::env::var("FAKE_NO_TOOLS").is_ok() {
+            return Err(McpError::method_not_found::<
+                rmcp::model::ListToolsRequestMethod,
+            >());
+        }
         // `FAKE_LIST_DELAY_MS` makes the listing slow.
         if let Some(ms) = std::env::var("FAKE_LIST_DELAY_MS")
             .ok()
@@ -42,7 +56,7 @@ impl ServerHandler for Fake {
         {
             tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
         }
-        Ok(ListToolsResult {
+        let mut result = ListToolsResult {
             tools: vec![
                 Tool::new("echo", "Echo the text", schema("text")),
                 Tool::new("env", "Read an environment variable", schema("name")),
@@ -51,7 +65,16 @@ impl ServerHandler for Fake {
                 Tool::new("hang", "Waits to be cancelled", schema("marker")),
             ],
             ..Default::default()
-        })
+        };
+        result.ttl_ms = std::env::var("FAKE_TTL_MS")
+            .ok()
+            .and_then(|ms| ms.parse().ok());
+        result.cache_scope = match std::env::var("FAKE_CACHE_SCOPE").as_deref() {
+            Ok("public") => Some(CacheScope::Public),
+            Ok("private") => Some(CacheScope::Private),
+            _ => None,
+        };
+        Ok(result)
     }
 
     async fn call_tool(

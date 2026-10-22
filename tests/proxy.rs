@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use rmcp::ServiceExt;
-use rmcp::model::{CallToolRequestParams, CallToolResult};
+use rmcp::model::{CacheScope, CallToolRequestParams, CallToolResult};
 use rmcp::service::{RoleClient, RoleServer, RunningService};
 use serde_json::json;
 
@@ -323,5 +323,111 @@ async fn unknown_tools_are_rejected() {
     for name in ["echo", "nope__echo", "fake__nope"] {
         assert!(harness.call(name, json!({})).await.is_err(), "{name}");
     }
+    harness.finish().await;
+}
+
+/// The hints of the tool list the agent receives.
+async fn tool_list_hints(harness: &Harness) -> (Option<u64>, Option<CacheScope>) {
+    let list = harness.client.peer().list_tools(None).await.unwrap();
+    (list.ttl_ms, list.cache_scope)
+}
+
+#[tokio::test]
+async fn a_list_without_hints_is_passed_on_as_uncacheable() {
+    let store = store_with(&[]);
+    let harness = start(vec![stdio("fake", &fake_upstream_path(), &[], &store)]).await;
+
+    assert_eq!(
+        tool_list_hints(&harness).await,
+        (Some(0), Some(CacheScope::Private))
+    );
+    harness.finish().await;
+}
+
+#[tokio::test]
+async fn the_hints_of_one_upstream_reach_the_agent() {
+    let store = store_with(&[]);
+    let env = [("FAKE_TTL_MS", "60000"), ("FAKE_CACHE_SCOPE", "public")];
+    let harness = start(vec![stdio("fake", &fake_upstream_path(), &env, &store)]).await;
+
+    assert_eq!(
+        tool_list_hints(&harness).await,
+        (Some(60_000), Some(CacheScope::Public))
+    );
+    harness.finish().await;
+}
+
+#[tokio::test]
+async fn merged_lists_get_the_weakest_hint() {
+    let store = store_with(&[]);
+    let long_public = [("FAKE_TTL_MS", "60000"), ("FAKE_CACHE_SCOPE", "public")];
+    let short_private = [("FAKE_TTL_MS", "5000"), ("FAKE_CACHE_SCOPE", "private")];
+    let harness = start(vec![
+        stdio("a", &fake_upstream_path(), &long_public, &store),
+        stdio("b", &fake_upstream_path(), &short_private, &store),
+    ])
+    .await;
+
+    assert_eq!(
+        tool_list_hints(&harness).await,
+        (Some(5_000), Some(CacheScope::Private))
+    );
+    harness.finish().await;
+}
+
+#[tokio::test]
+async fn a_list_missing_an_upstream_is_not_cacheable() {
+    let store = store_with(&[]);
+    let env = [("FAKE_TTL_MS", "60000"), ("FAKE_CACHE_SCOPE", "public")];
+    let harness = start(vec![
+        stdio("fake", &fake_upstream_path(), &env, &store),
+        stdio("broken", "/nonexistent/toolward-test-binary", &[], &store),
+    ])
+    .await;
+
+    assert_eq!(
+        tool_list_hints(&harness).await,
+        (Some(0), Some(CacheScope::Private))
+    );
+    harness.finish().await;
+}
+
+#[tokio::test]
+async fn an_upstream_without_tools_does_not_limit_the_hint() {
+    let store = store_with(&[]);
+    let env = [("FAKE_TTL_MS", "60000"), ("FAKE_CACHE_SCOPE", "public")];
+    let harness = start(vec![
+        stdio("fake", &fake_upstream_path(), &env, &store),
+        stdio(
+            "promptsonly",
+            &fake_upstream_path(),
+            &[("FAKE_NO_TOOLS", "1")],
+            &store,
+        ),
+    ])
+    .await;
+
+    assert_eq!(
+        tool_list_hints(&harness).await,
+        (Some(60_000), Some(CacheScope::Public))
+    );
+    harness.finish().await;
+}
+
+#[tokio::test]
+async fn resource_templates_carry_hints() {
+    let store = store_with(&[]);
+    let harness = start(vec![stdio("fake", &fake_upstream_path(), &[], &store)]).await;
+
+    let list = harness
+        .client
+        .peer()
+        .list_resource_templates(None)
+        .await
+        .unwrap();
+    assert_eq!(
+        (list.ttl_ms, list.cache_scope),
+        (Some(0), Some(CacheScope::Private))
+    );
     harness.finish().await;
 }

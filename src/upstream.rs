@@ -12,8 +12,8 @@ use rmcp::ServiceExt;
 use rmcp::handler::client::ClientHandler;
 use rmcp::model::{ClientConfig, Implementation, ProtocolVersion, Tool};
 use rmcp::service::{
-    ClientInitializeError, ClientLifecycleMode, ClientServiceExt, NotificationContext, Peer,
-    RoleClient, RoleServer, RunningService,
+    ClientCacheConfig, ClientInitializeError, ClientLifecycleMode, ClientServiceExt,
+    NotificationContext, Peer, RoleClient, RoleServer, RunningService,
 };
 use rmcp::transport::IntoTransport;
 use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
@@ -22,6 +22,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::ChildStderr;
 use tokio::sync::Mutex;
 
+use crate::cache::{self, Listed};
 use crate::interpolate::{self, InterpolateError};
 use crate::names;
 use crate::store::CredentialStore;
@@ -712,15 +713,29 @@ impl Upstream {
         redact_value(value, &secrets)
     }
 
+    /// Like [`Upstream::redact_result`], for the items of a listing.
+    pub fn redact_listed<T>(&self, listed: Listed<T>) -> Result<Listed<T>, String>
+    where
+        T: serde::Serialize + serde::de::DeserializeOwned,
+    {
+        Ok(Listed {
+            items: self.redact_result(listed.items)?,
+            hint: listed.hint,
+        })
+    }
+
     /// Lists the tools under the names the agent sees (without the
     /// `<server>__` prefix) and remembers how to map them back.
-    pub async fn tools(&self) -> Result<Vec<Tool>, String> {
+    pub async fn tools(&self) -> Result<Listed<Tool>, String> {
         let peer = self.list_peer().await?;
         self.tools_from(&peer).await
     }
 
-    async fn tools_from(&self, peer: &Peer<RoleClient>) -> Result<Vec<Tool>, String> {
-        let mut tools = self.bounded(peer.list_all_tools()).await?;
+    async fn tools_from(&self, peer: &Peer<RoleClient>) -> Result<Listed<Tool>, String> {
+        let Listed {
+            items: mut tools,
+            hint,
+        } = self.bounded(cache::list_tools(peer)).await?;
         let originals: Vec<String> = tools.iter().map(|t| t.name.to_string()).collect();
         let assignment = names::assign(&self.name, &originals);
         let by_original: HashMap<&str, &str> = assignment
@@ -766,7 +781,7 @@ impl Upstream {
                 ));
             }
         }
-        Ok(tools)
+        Ok(Listed { items: tools, hint })
     }
 
     /// `(exposed, original)` pairs from the last listing, sorted.
@@ -867,6 +882,10 @@ impl Upstream {
         match connected {
             Ok(client) => {
                 let peer = client.peer().clone();
+                // The agent caches by the hints the proxy passes on. A cache
+                // here would add its own age to theirs.
+                peer.set_response_cache_config(ClientCacheConfig::disabled())
+                    .await;
                 *state = State::Running(client);
                 Ok(peer)
             }

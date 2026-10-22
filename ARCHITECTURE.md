@@ -22,6 +22,7 @@ agent ──stdio──> Proxy ──> Upstream ──> Connect (stdio | http | 
 | `proxy.rs` | The MCP server the agent talks to. Merges tools, resources and prompts of all upstreams and forwards requests. |
 | `upstream.rs` | One upstream: lazy connect, reconnect with back-off, timeouts, and redaction of results. Holds the stdio and HTTP connectors. |
 | `oauth.rs` | OAuth 2.0 for HTTP upstreams: PKCE login with a loopback redirect, token storage in the credential store, refresh at `serve` time. |
+| `cache.rs` | Caching hints (`ttlMs`, `cacheScope`) of list results. Merges the hints of many upstreams into the weakest one. |
 | `names.rs` | Builds the tool names the agent sees and keeps them inside the client name limit. |
 | `import.rs` | Plans and applies the move of plaintext secrets from an existing `mcp.json` into the credential store. |
 
@@ -39,6 +40,7 @@ agent ──stdio──> Proxy ──> Upstream ──> Connect (stdio | http | 
 - **Redaction is best effort and fail closed.** It matches the secret as is, JSON-escaped, URL-encoded, base64 and per line. It cannot find a secret that an upstream hashes or splits. See the threat model in the README.
 - **Only account names are logged.** Logs go to stderr; stdout is reserved for the protocol.
 - **OAuth logins are separate from `serve`.** `serve` never opens a browser. Tokens live in the account `oauth.<server>`, a name that users cannot set with `secret set`.
+- **The agent does the caching.** toolward turns off the response cache of its upstream connections and passes on the weakest `ttlMs` and `cacheScope` of the listings a result was merged from. A list with a missing upstream gets `ttlMs: 0`, because it is incomplete. A second cache here would add its age to the agent's.
 - **The agent sees one server.** Failure of one upstream does not stop the others.
 
 ## Tests
