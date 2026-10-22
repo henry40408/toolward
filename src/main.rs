@@ -1,4 +1,5 @@
 use std::io::{self, Write};
+use std::path::Path;
 use std::process::ExitCode;
 use std::sync::Arc;
 
@@ -31,79 +32,99 @@ fn run(cli: Cli) -> Result<ExitCode> {
     }
 
     let mut out = io::stdout().lock();
-    match &cli.command {
-        Command::Secret(SecretCommand::Set { account }) => {
-            // Fail before prompting, so the user does not type a secret for a rejected name.
-            validate_user_account(account)?;
-            let store = KeyringStore::native()?;
-            let secret = cli::read_secret(account)?;
-            cli::secret_set(&store, account, &secret, &mut out)?;
-        }
-        Command::Secret(SecretCommand::Delete { account }) => {
-            let store = KeyringStore::native()?;
-            cli::secret_delete(&store, account, &mut out)?;
-        }
+    let code = match &cli.command {
+        Command::Secret(SecretCommand::Set { account }) => run_secret_set(account, &mut out)?,
+        Command::Secret(SecretCommand::Delete { account }) => run_secret_delete(account, &mut out)?,
         Command::Auth(AuthCommand::Login { server }) => {
-            let config = Config::load(&cli.config_path()?)?;
-            let (url, oauth) = config.oauth_server(server).map_err(anyhow::Error::msg)?;
-            let store: Arc<dyn CredentialStore> = Arc::new(KeyringStore::native()?);
-            let runtime = tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()?;
-            let request = toolward::oauth::LoginRequest { server, url, oauth };
-            let announce = |url: &str| {
-                eprintln!("Opening your browser. If it does not open, visit:\n{url}");
-            };
-            runtime
-                .block_on(toolward::oauth::login(
-                    request,
-                    store,
-                    &announce,
-                    toolward::oauth::LOGIN_TIMEOUT,
-                ))
-                .map_err(anyhow::Error::msg)?;
-            writeln!(out, "logged in to {server:?}")?;
+            run_auth_login(&cli.config_path()?, server, &mut out)?
         }
-        Command::Auth(AuthCommand::Logout { server }) => {
-            let store = KeyringStore::native()?;
-            if toolward::oauth::logout(&store, server).map_err(anyhow::Error::msg)? {
-                writeln!(out, "logged out of {server:?}")?;
-            } else {
-                writeln!(out, "no login stored for {server:?}")?;
-            }
-        }
-        Command::Import { file, apply } => {
-            let source = std::fs::read_to_string(file)
-                .with_context(|| format!("cannot read {}", file.display()))?;
-            let mut plan = import::plan(&source)?;
-            if *apply {
-                let store = KeyringStore::native()?;
-                import::apply(&mut plan, &store, &cli.config_path()?)?;
-            }
-            import::report(&plan, *apply, &mut out)?;
-        }
-        Command::Check { tools } => {
-            let config = Config::load(&cli.config_path()?)?;
-            let store = CachedStore::new(KeyringStore::native()?);
-            let mut ok = cli::check(&config, &store, &mut out)?;
-            if *tools {
-                let store: Arc<dyn CredentialStore> = Arc::new(store);
-                let proxy = Proxy::from_config(&config, &store);
-                writeln!(out)?;
-                let runtime = tokio::runtime::Builder::new_multi_thread()
-                    .enable_all()
-                    .build()?;
-                ok &= runtime.block_on(cli::check_tools(&proxy, &mut out))?;
-            }
-            if !ok {
-                out.flush()?;
-                return Ok(ExitCode::FAILURE);
-            }
-        }
+        Command::Auth(AuthCommand::Logout { server }) => run_auth_logout(server, &mut out)?,
+        Command::Import { file, apply } => run_import(&cli, file, *apply, &mut out)?,
+        Command::Check { tools } => run_check(&cli.config_path()?, *tools, &mut out)?,
         Command::Serve => unreachable!("handled above"),
-    }
+    };
     out.flush()?;
+    Ok(code)
+}
+
+fn new_runtime() -> Result<tokio::runtime::Runtime> {
+    Ok(tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?)
+}
+
+fn run_secret_set(account: &str, out: &mut dyn Write) -> Result<ExitCode> {
+    // Fail before prompting, so the user does not type a secret for a rejected name.
+    validate_user_account(account)?;
+    let store = KeyringStore::native()?;
+    let secret = cli::read_secret(account)?;
+    cli::secret_set(&store, account, &secret, out)?;
     Ok(ExitCode::SUCCESS)
+}
+
+fn run_secret_delete(account: &str, out: &mut dyn Write) -> Result<ExitCode> {
+    let store = KeyringStore::native()?;
+    cli::secret_delete(&store, account, out)?;
+    Ok(ExitCode::SUCCESS)
+}
+
+fn run_auth_login(config_path: &Path, server: &str, out: &mut dyn Write) -> Result<ExitCode> {
+    let config = Config::load(config_path)?;
+    let (url, oauth) = config.oauth_server(server).map_err(anyhow::Error::msg)?;
+    let store: Arc<dyn CredentialStore> = Arc::new(KeyringStore::native()?);
+    let request = toolward::oauth::LoginRequest { server, url, oauth };
+    let announce = |url: &str| {
+        eprintln!("Opening your browser. If it does not open, visit:\n{url}");
+    };
+    new_runtime()?
+        .block_on(toolward::oauth::login(
+            request,
+            store,
+            &announce,
+            toolward::oauth::LOGIN_TIMEOUT,
+        ))
+        .map_err(anyhow::Error::msg)?;
+    writeln!(out, "logged in to {server:?}")?;
+    Ok(ExitCode::SUCCESS)
+}
+
+fn run_auth_logout(server: &str, out: &mut dyn Write) -> Result<ExitCode> {
+    let store = KeyringStore::native()?;
+    if toolward::oauth::logout(&store, server).map_err(anyhow::Error::msg)? {
+        writeln!(out, "logged out of {server:?}")?;
+    } else {
+        writeln!(out, "no login stored for {server:?}")?;
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+fn run_import(cli: &Cli, file: &Path, apply: bool, out: &mut dyn Write) -> Result<ExitCode> {
+    let source =
+        std::fs::read_to_string(file).with_context(|| format!("cannot read {}", file.display()))?;
+    let mut plan = import::plan(&source)?;
+    if apply {
+        let store = KeyringStore::native()?;
+        import::apply(&mut plan, &store, &cli.config_path()?)?;
+    }
+    import::report(&plan, apply, out)?;
+    Ok(ExitCode::SUCCESS)
+}
+
+fn run_check(config_path: &Path, tools: bool, out: &mut dyn Write) -> Result<ExitCode> {
+    let config = Config::load(config_path)?;
+    let store = CachedStore::new(KeyringStore::native()?);
+    let mut ok = cli::check(&config, &store, out)?;
+    if tools {
+        let store: Arc<dyn CredentialStore> = Arc::new(store);
+        let proxy = Proxy::from_config(&config, &store);
+        writeln!(out)?;
+        ok &= new_runtime()?.block_on(cli::check_tools(&proxy, out))?;
+    }
+    Ok(if ok {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    })
 }
 
 /// Resolves on SIGINT or SIGTERM (Ctrl-C only on non-Unix platforms).
@@ -129,9 +150,7 @@ async fn wait_for_signal() {
 }
 
 fn serve(config: &Config, store: &Arc<dyn CredentialStore>) -> Result<ExitCode> {
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()?;
+    let runtime = new_runtime()?;
     let result = runtime.block_on(async {
         let proxy = Proxy::from_config(config, store);
         let running = proxy.clone().serve(rmcp::transport::stdio()).await?;

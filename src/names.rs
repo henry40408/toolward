@@ -110,34 +110,11 @@ pub fn assign(server: &str, originals: &[String]) -> Assignment {
     assign_with(server, originals, sha256)
 }
 
-fn assign_with(
-    server: &str,
-    originals: &[String],
-    digest: impl Fn(&str, &str) -> Vec<u8>,
-) -> Assignment {
-    let room = BUDGET.saturating_sub(server.len() + SEPARATOR.len());
-    let max_hash_len = MAX_HASH_LEN.min(room.saturating_sub(2)).max(1);
-    let mut entries: Vec<Entry> = originals
-        .iter()
-        .map(|original| {
-            let mut stem = sanitize(original);
-            let plain = !original.is_empty() && stem == *original && original.len() <= room;
-            if stem.is_empty() {
-                stem.push('_');
-            }
-            Entry {
-                original,
-                stem,
-                plain,
-                hash_len: HASH_LEN.min(max_hash_len),
-                digest: digest(server, original),
-            }
-        })
-        .collect();
-
+/// A longer hash separates names that collide. Each round grows the hash of
+/// every colliding hashed name; the loop ends when nothing can grow. Returns,
+/// per entry, whether it was dropped because it still collides.
+fn widen_colliding_hashes(entries: &mut [Entry], room: usize, max_hash_len: usize) -> Vec<bool> {
     let mut dropped = vec![false; entries.len()];
-    // A longer hash separates names that collide. Each round grows the hash of
-    // every colliding hashed name; the loop ends when nothing can grow.
     loop {
         let mut seen: HashMap<String, Vec<usize>> = HashMap::new();
         for (index, entry) in entries.iter().enumerate() {
@@ -164,8 +141,36 @@ fn assign_with(
                 dropped[index] = true;
             }
         }
-        break;
+        return dropped;
     }
+}
+
+fn assign_with(
+    server: &str,
+    originals: &[String],
+    digest: impl Fn(&str, &str) -> Vec<u8>,
+) -> Assignment {
+    let room = BUDGET.saturating_sub(server.len() + SEPARATOR.len());
+    let max_hash_len = MAX_HASH_LEN.min(room.saturating_sub(2)).max(1);
+    let mut entries: Vec<Entry> = originals
+        .iter()
+        .map(|original| {
+            let mut stem = sanitize(original);
+            let plain = !original.is_empty() && stem == *original && original.len() <= room;
+            if stem.is_empty() {
+                stem.push('_');
+            }
+            Entry {
+                original,
+                stem,
+                plain,
+                hash_len: HASH_LEN.min(max_hash_len),
+                digest: digest(server, original),
+            }
+        })
+        .collect();
+
+    let dropped = widen_colliding_hashes(&mut entries, room, max_hash_len);
 
     let mut assignment = Assignment::default();
     for (index, entry) in entries.iter().enumerate() {

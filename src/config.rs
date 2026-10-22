@@ -181,6 +181,56 @@ fn validate_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn check_server_fields(name: &str, server: &ServerConfig) -> Result<(), ConfigError> {
+    let fail = |reason: String| ConfigError::Server {
+        name: name.to_owned(),
+        reason,
+    };
+    validate_name(name).map_err(fail)?;
+    server.transport().map_err(fail)?;
+    if let Some(command) = &server.command
+        && !interpolate::references(command)
+            .unwrap_or_default()
+            .is_empty()
+    {
+        return Err(fail("'command' must not contain secret references".into()));
+    }
+    // URLs end up in logs and error messages; secrets belong in 'headers'.
+    if let Some(url) = &server.url
+        && !interpolate::references(url).unwrap_or_default().is_empty()
+    {
+        return Err(fail(
+            "'url' must not contain secret references; use 'headers' instead".into(),
+        ));
+    }
+    // Arguments are visible to every local process (`ps`); use 'env' instead.
+    if server
+        .args
+        .iter()
+        .any(|arg| !interpolate::references(arg).unwrap_or_default().is_empty())
+    {
+        return Err(fail(
+            "'args' must not contain secret references (they show up in `ps`); \
+             pass secrets through 'env'"
+                .into(),
+        ));
+    }
+    for (field, value) in &server.extra {
+        if contains_reference(value) {
+            return Err(fail(format!(
+                "secret references are not supported in field {field:?}"
+            )));
+        }
+    }
+    for text in server.interpolated_strings() {
+        interpolate::references(text).map_err(|source| ConfigError::Reference {
+            name: name.to_owned(),
+            source,
+        })?;
+    }
+    Ok(())
+}
+
 impl Config {
     pub fn parse(text: &str) -> Result<Self, ConfigError> {
         let value =
@@ -203,6 +253,14 @@ impl Config {
     }
 
     fn validate(&self) -> Result<(), ConfigError> {
+        self.check_folded_names()?;
+        for (name, server) in &self.mcp_servers {
+            check_server_fields(name, server)?;
+        }
+        Ok(())
+    }
+
+    fn check_folded_names(&self) -> Result<(), ConfigError> {
         // Some clients turn '-' into '_' (Codex, pi), so "a-b" and "a_b" would clash.
         let mut folded: BTreeMap<String, &str> = BTreeMap::new();
         for name in self.mcp_servers.keys() {
@@ -214,54 +272,6 @@ impl Config {
                          some clients treat them as the same"
                     ),
                 });
-            }
-        }
-        for (name, server) in &self.mcp_servers {
-            let fail = |reason: String| ConfigError::Server {
-                name: name.clone(),
-                reason,
-            };
-            validate_name(name).map_err(fail)?;
-            server.transport().map_err(fail)?;
-            if let Some(command) = &server.command
-                && !interpolate::references(command)
-                    .unwrap_or_default()
-                    .is_empty()
-            {
-                return Err(fail("'command' must not contain secret references".into()));
-            }
-            // URLs end up in logs and error messages; secrets belong in 'headers'.
-            if let Some(url) = &server.url
-                && !interpolate::references(url).unwrap_or_default().is_empty()
-            {
-                return Err(fail(
-                    "'url' must not contain secret references; use 'headers' instead".into(),
-                ));
-            }
-            // Arguments are visible to every local process (`ps`); use 'env' instead.
-            if server
-                .args
-                .iter()
-                .any(|arg| !interpolate::references(arg).unwrap_or_default().is_empty())
-            {
-                return Err(fail(
-                    "'args' must not contain secret references (they show up in `ps`); \
-                     pass secrets through 'env'"
-                        .into(),
-                ));
-            }
-            for (field, value) in &server.extra {
-                if contains_reference(value) {
-                    return Err(fail(format!(
-                        "secret references are not supported in field {field:?}"
-                    )));
-                }
-            }
-            for text in server.interpolated_strings() {
-                interpolate::references(text).map_err(|source| ConfigError::Reference {
-                    name: name.clone(),
-                    source,
-                })?;
             }
         }
         Ok(())

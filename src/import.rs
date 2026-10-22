@@ -174,6 +174,44 @@ impl Planner {
         account
     }
 
+    /// Plans one server. `Err` carries the reason it is left out.
+    fn plan_server(&mut self, name: &str, server: Value) -> Result<Map<String, Value>, String> {
+        let Value::Object(mut server) = server else {
+            return Err("not an object".into());
+        };
+        if server.get("type").and_then(Value::as_str) == Some("sse") {
+            return Err("SSE servers are not supported".into());
+        }
+        if server.contains_key("oauth") {
+            return Err("already has an \"oauth\" setting".into());
+        }
+        if let Some(reason) = inline_secret(&server) {
+            return Err(format!(
+                "{reason}; move it into env by hand, then import again"
+            ));
+        }
+        let (moves, secrets, notes) = (self.moves.len(), self.secrets.len(), self.notes.len());
+        if let Some(Value::Object(env)) = server.get_mut("env") {
+            self.extract_secrets(name, "env", env);
+        }
+        if let Some(Value::Object(headers)) = server.get_mut("headers") {
+            self.extract_secrets(name, "header", headers);
+        }
+        // A server toolward cannot load (for example one with a foreign
+        // ${...} reference) is left out whole, and its moves are undone.
+        let mut single_server = Map::new();
+        single_server.insert(name.to_owned(), Value::Object(server.clone()));
+        let mut root = Map::new();
+        root.insert("mcpServers".into(), Value::Object(single_server));
+        if let Err(err) = Config::parse(&Value::Object(root).to_string()) {
+            self.moves.truncate(moves);
+            self.secrets.truncate(secrets);
+            self.notes.truncate(notes);
+            return Err(safe_error(&err));
+        }
+        Ok(server)
+    }
+
     /// Replaces the secret-looking string values of `table`.
     fn extract_secrets(&mut self, server: &str, kind: &str, table: &mut Map<String, Value>) {
         for (key, value) in table.iter_mut() {
@@ -219,49 +257,12 @@ pub fn plan(source: &str) -> Result<Plan> {
     let mut out = Map::new();
     let mut skipped = Vec::new();
     for (name, server) in servers {
-        let Value::Object(mut server) = server else {
-            skipped.push(format!("{name}: not an object"));
-            continue;
-        };
-        if server.get("type").and_then(Value::as_str) == Some("sse") {
-            skipped.push(format!("{name}: SSE servers are not supported"));
-            continue;
+        match planner.plan_server(&name, server) {
+            Ok(server) => {
+                out.insert(name, Value::Object(server));
+            }
+            Err(reason) => skipped.push(format!("{name}: {reason}")),
         }
-        if server.contains_key("oauth") {
-            skipped.push(format!("{name}: already has an \"oauth\" setting"));
-            continue;
-        }
-        if let Some(reason) = inline_secret(&server) {
-            skipped.push(format!(
-                "{name}: {reason}; move it into env by hand, then import again"
-            ));
-            continue;
-        }
-        let (moves, secrets, notes) = (
-            planner.moves.len(),
-            planner.secrets.len(),
-            planner.notes.len(),
-        );
-        if let Some(Value::Object(env)) = server.get_mut("env") {
-            planner.extract_secrets(&name, "env", env);
-        }
-        if let Some(Value::Object(headers)) = server.get_mut("headers") {
-            planner.extract_secrets(&name, "header", headers);
-        }
-        // A server toolward cannot load (for example one with a foreign
-        // ${...} reference) is left out whole, and its moves are undone.
-        let mut single_server = Map::new();
-        single_server.insert(name.clone(), Value::Object(server.clone()));
-        let mut root = Map::new();
-        root.insert("mcpServers".into(), Value::Object(single_server));
-        if let Err(err) = Config::parse(&Value::Object(root).to_string()) {
-            planner.moves.truncate(moves);
-            planner.secrets.truncate(secrets);
-            planner.notes.truncate(notes);
-            skipped.push(format!("{name}: {}", safe_error(&err)));
-            continue;
-        }
-        out.insert(name, Value::Object(server));
     }
 
     let plan = Plan {
@@ -359,6 +360,67 @@ fn roll_back(store: &dyn CredentialStore, created: &[String]) -> Vec<String> {
         .collect()
 }
 
+/// Reads the config at `path` as a JSON object. A missing file or `null` is empty.
+fn read_existing_document(path: &Path) -> Result<Map<String, Value>> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Map::new()),
+        Err(err) => return Err(err).with_context(|| format!("cannot read {}", path.display())),
+    };
+    let value = jsonc_parser::parse_to_serde_value::<Value>(&text, &Default::default())
+        .map_err(|_| anyhow::anyhow!("the existing config is not valid JSON"))?;
+    match value {
+        Value::Object(map) => Ok(map),
+        Value::Null => Ok(Map::new()),
+        _ => bail!("the existing config is not a JSON object"),
+    }
+}
+
+/// Stores the secrets `chosen` marks as new, then replaces the file at `path`
+/// with `text`. If either step fails, the accounts this run created are deleted.
+fn store_and_replace(
+    store: &dyn CredentialStore,
+    path: &Path,
+    text: &str,
+    chosen: &[(String, bool)],
+    secrets: &[(String, String)],
+) -> Result<()> {
+    // Write through a symlink instead of replacing it.
+    let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).with_context(|| format!("cannot create {}", dir.display()))?;
+    }
+    let temp = path.with_extension("json.tmp");
+    let mut created: Vec<String> = Vec::new();
+    let result = write_private(&temp, text)
+        .with_context(|| format!("cannot write {}", temp.display()))
+        .and_then(|()| {
+            for ((account, needs_set), (_, secret)) in chosen.iter().zip(secrets) {
+                if *needs_set {
+                    // A failed `set` may still have created the account.
+                    created.push(account.clone());
+                    store
+                        .set(account, secret)
+                        .with_context(|| format!("cannot store {account}"))?;
+                }
+            }
+            std::fs::rename(&temp, &path)
+                .with_context(|| format!("cannot replace {}", path.display()))
+        });
+    let Err(err) = result else {
+        return Ok(());
+    };
+    let _ = std::fs::remove_file(&temp);
+    let left = roll_back(store, &created);
+    if left.is_empty() {
+        return Err(err);
+    }
+    bail!(
+        "{err:#}; also could not remove the stored account(s): {}",
+        left.join(", ")
+    );
+}
+
 /// Stores the secrets and writes the servers into the config file at `path`,
 /// merging with what is there (comments in an existing file are lost).
 /// Nothing is written unless every check passes first. If storing a secret or
@@ -375,19 +437,7 @@ pub fn apply(plan: &mut Plan, store: &dyn CredentialStore, path: &Path) -> Resul
     for (account, _) in &plan.secrets {
         validate_user_account(account)?;
     }
-    let mut document = match std::fs::read_to_string(path) {
-        Ok(text) => {
-            let value = jsonc_parser::parse_to_serde_value::<Value>(&text, &Default::default())
-                .map_err(|_| anyhow::anyhow!("the existing config is not valid JSON"))?;
-            match value {
-                Value::Object(map) => map,
-                Value::Null => Map::new(),
-                _ => bail!("the existing config is not a JSON object"),
-            }
-        }
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Map::new(),
-        Err(err) => return Err(err).with_context(|| format!("cannot read {}", path.display())),
-    };
+    let mut document = read_existing_document(path)?;
     let existing = document
         .entry("mcpServers")
         .or_insert_with(|| Value::Object(Map::new()));
@@ -417,39 +467,7 @@ pub fn apply(plan: &mut Plan, store: &dyn CredentialStore, path: &Path) -> Resul
     Config::parse(&text)
         .map_err(|err| anyhow::anyhow!("the merged config is not valid: {}", safe_error(&err)))?;
 
-    // Write through a symlink instead of replacing it.
-    let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).with_context(|| format!("cannot create {}", dir.display()))?;
-    }
-    let temp = path.with_extension("json.tmp");
-    let mut created: Vec<String> = Vec::new();
-    let result = write_private(&temp, &text)
-        .with_context(|| format!("cannot write {}", temp.display()))
-        .and_then(|()| {
-            for ((account, needs_set), (_, secret)) in chosen.iter().zip(&plan.secrets) {
-                if *needs_set {
-                    // A failed `set` may still have created the account.
-                    created.push(account.clone());
-                    store
-                        .set(account, secret)
-                        .with_context(|| format!("cannot store {account}"))?;
-                }
-            }
-            std::fs::rename(&temp, &path)
-                .with_context(|| format!("cannot replace {}", path.display()))
-        });
-    if let Err(err) = result {
-        let _ = std::fs::remove_file(&temp);
-        let left = roll_back(store, &created);
-        if left.is_empty() {
-            return Err(err);
-        }
-        bail!(
-            "{err:#}; also could not remove the stored account(s): {}",
-            left.join(", ")
-        );
-    }
+    store_and_replace(store, path, &text, &chosen, &plan.secrets)?;
     for ((account, _), (slot, _)) in chosen.iter().zip(plan.secrets.iter_mut()) {
         slot.clone_from(account);
     }
