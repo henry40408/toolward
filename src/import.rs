@@ -175,7 +175,7 @@ impl Planner {
     }
 
     /// Replaces the secret-looking string values of `table`.
-    fn table(&mut self, server: &str, kind: &str, table: &mut Map<String, Value>) {
+    fn extract_secrets(&mut self, server: &str, kind: &str, table: &mut Map<String, Value>) {
         for (key, value) in table.iter_mut() {
             let Some(text) = value.as_str() else { continue };
             if text.is_empty() || !(looks_secret(key) || has_secret_prefix(text)) {
@@ -243,17 +243,17 @@ pub fn plan(source: &str) -> Result<Plan> {
             planner.notes.len(),
         );
         if let Some(Value::Object(env)) = server.get_mut("env") {
-            planner.table(&name, "env", env);
+            planner.extract_secrets(&name, "env", env);
         }
         if let Some(Value::Object(headers)) = server.get_mut("headers") {
-            planner.table(&name, "header", headers);
+            planner.extract_secrets(&name, "header", headers);
         }
         // A server toolward cannot load (for example one with a foreign
         // ${...} reference) is left out whole, and its moves are undone.
-        let mut one = Map::new();
-        one.insert(name.clone(), Value::Object(server.clone()));
+        let mut single_server = Map::new();
+        single_server.insert(name.clone(), Value::Object(server.clone()));
         let mut root = Map::new();
-        root.insert("mcpServers".into(), Value::Object(one));
+        root.insert("mcpServers".into(), Value::Object(single_server));
         if let Err(err) = Config::parse(&Value::Object(root).to_string()) {
             planner.moves.truncate(moves);
             planner.secrets.truncate(secrets);
@@ -332,19 +332,19 @@ fn choose_accounts(
     Ok(chosen)
 }
 
-/// Points the value that `m` describes at `new` instead of `m.account`.
-fn retarget(servers: &mut Map<String, Value>, m: &Move, new: &str) {
-    let Some((kind, key)) = m.place.split_once(' ') else {
+/// Points the value that `moved` describes at `new` instead of `moved.account`.
+fn retarget(servers: &mut Map<String, Value>, moved: &Move, new: &str) {
+    let Some((kind, key)) = moved.place.split_once(' ') else {
         return;
     };
     let kind = if kind == "header" { "headers" } else { kind };
     if let Some(Value::String(text)) = servers
-        .get_mut(&m.server)
+        .get_mut(&moved.server)
         .and_then(|s| s.get_mut(kind))
         .and_then(|t| t.get_mut(key))
     {
         *text = text.replace(
-            &format!("${{keychain:{}}}", m.account),
+            &format!("${{keychain:{}}}", moved.account),
             &format!("${{keychain:{new}}}"),
         );
     }
@@ -405,10 +405,10 @@ pub fn apply(plan: &mut Plan, store: &dyn CredentialStore, path: &Path) -> Resul
 
     let mut servers = plan.servers.clone();
     let mut moves = plan.moves.clone();
-    for (m, (account, _)) in moves.iter_mut().zip(&chosen) {
-        if m.account != *account {
-            retarget(&mut servers, m, account);
-            m.account.clone_from(account);
+    for (moved, (account, _)) in moves.iter_mut().zip(&chosen) {
+        if moved.account != *account {
+            retarget(&mut servers, moved, account);
+            moved.account.clone_from(account);
         }
     }
     existing.extend(servers.clone());
@@ -473,11 +473,11 @@ fn write_private(path: &Path, text: &str) -> std::io::Result<()> {
 /// Prints the plan. Never prints a secret value.
 pub fn report(plan: &Plan, applied: bool, out: &mut dyn std::io::Write) -> Result<()> {
     let verb = if applied { "moved" } else { "would move" };
-    for m in &plan.moves {
+    for moved in &plan.moves {
         writeln!(
             out,
             "{verb} {}: {} -> ${{keychain:{}}}",
-            m.server, m.place, m.account
+            moved.server, moved.place, moved.account
         )?;
     }
     if plan.moves.is_empty() {

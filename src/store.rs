@@ -340,7 +340,6 @@ mod tests {
         always.get("a").unwrap();
         always.get("a").unwrap();
         assert_eq!(always.inner.reads.load(SeqCst), 1);
-        // Genuine expiry check.
         let store = CachedStore::with_ttl(Probe::default(), ttl);
         store.get("a").unwrap();
         assert_eq!(store.inner.reads.load(SeqCst), 1);

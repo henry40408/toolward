@@ -313,9 +313,9 @@ impl Connect for OAuthConnector {
         Box::pin(async move {
             let account = account_for(&self.spec.server)?;
             let reread = TokenStore::new(Arc::clone(&self.store), account.clone());
-            let late = handler.clone();
+            let refresh_handler = handler.clone();
             let tokens = TokenStore::new(Arc::clone(&self.store), account)
-                .on_save(move |values| late.add_secrets(&values));
+                .on_save(move |values| refresh_handler.add_secrets(&values));
             let stored = RmcpCredentialStore::load(&tokens)
                 .await
                 .map_err(|err| auth_failure(&err, &[]))?;

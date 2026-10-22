@@ -242,13 +242,13 @@ async fn tools_are_prefixed_forwarded_and_get_the_secret_header() {
         &[("Authorization", "Bearer ${keychain:tok}")],
         &store,
     );
-    let h = start(vec![upstream]).await;
+    let harness = start(vec![upstream]).await;
 
-    let tools = h.client.peer().list_all_tools().await.unwrap();
+    let tools = harness.client.peer().list_all_tools().await.unwrap();
     let names: Vec<String> = tools.iter().map(|t| t.name.to_string()).collect();
     assert_eq!(names, ["web__echo", "web__whoami"]);
 
-    let result = h
+    let result = harness
         .client
         .peer()
         .call_tool(CallToolRequestParams::new("web__whoami"))
@@ -265,7 +265,7 @@ async fn secrets_are_masked_in_resources_and_prompts() {
     let fake = fake_with_tools(&[]);
     let url = serve_fake(fake).await;
     let store: Arc<dyn CredentialStore> = Arc::new(MemoryStore::with(&[("tok", "s3cr3t")]));
-    let h = start(vec![http_upstream(
+    let harness = start(vec![http_upstream(
         "web",
         &url,
         &[("Authorization", "${keychain:tok}")],
@@ -273,8 +273,8 @@ async fn secrets_are_masked_in_resources_and_prompts() {
     )])
     .await;
 
-    let resources = h.client.peer().list_all_resources().await.unwrap();
-    let read = h
+    let resources = harness.client.peer().list_all_resources().await.unwrap();
+    let read = harness
         .client
         .peer()
         .read_resource(ReadResourceRequestParams::new(resources[0].uri.clone()))
@@ -284,7 +284,7 @@ async fn secrets_are_masked_in_resources_and_prompts() {
     assert!(read.contains("hello[REDACTED]"), "{read}");
     assert!(!read.contains("s3cr3t"), "{read}");
 
-    let prompt = h
+    let prompt = harness
         .client
         .peer()
         .get_prompt(GetPromptRequestParams::new("web__greet"))
@@ -300,9 +300,9 @@ async fn long_names_are_shortened_and_both_names_can_be_called() {
     let fake = fake_with_tools(&[LONG_TOOL, "short"]);
     let url = serve_fake(fake).await;
     let store: Arc<dyn CredentialStore> = Arc::new(MemoryStore::new());
-    let h = start(vec![http_upstream("gh", &url, &[], &store)]).await;
+    let harness = start(vec![http_upstream("gh", &url, &[], &store)]).await;
 
-    let tools = h.client.peer().list_all_tools().await.unwrap();
+    let tools = harness.client.peer().list_all_tools().await.unwrap();
     let names: Vec<String> = tools.iter().map(|t| t.name.to_string()).collect();
     let shortened = names
         .iter()
@@ -312,7 +312,7 @@ async fn long_names_are_shortened_and_both_names_can_be_called() {
     assert!(names.contains(&"gh__short".to_owned()));
 
     for name in [shortened.as_str(), &format!("gh__{LONG_TOOL}")] {
-        let result = h
+        let result = harness
             .client
             .peer()
             .call_tool(CallToolRequestParams::new(name.to_owned()))
@@ -327,11 +327,11 @@ async fn an_unknown_tool_triggers_a_relist_before_failing() {
     let fake = fake_with_tools(&["old"]);
     let url = serve_fake(Arc::clone(&fake)).await;
     let store: Arc<dyn CredentialStore> = Arc::new(MemoryStore::new());
-    let h = start(vec![http_upstream("web", &url, &[], &store)]).await;
+    let harness = start(vec![http_upstream("web", &url, &[], &store)]).await;
 
-    h.client.peer().list_all_tools().await.unwrap();
+    harness.client.peer().list_all_tools().await.unwrap();
     fake.tools.lock().unwrap().push("fresh".to_owned());
-    let result = h
+    let result = harness
         .client
         .peer()
         .call_tool(CallToolRequestParams::new("web__fresh"))
@@ -339,7 +339,7 @@ async fn an_unknown_tool_triggers_a_relist_before_failing() {
         .unwrap();
     assert_eq!(text_of(&result), "called fresh");
 
-    let err = h
+    let err = harness
         .client
         .peer()
         .call_tool(CallToolRequestParams::new("web__nope"))
@@ -353,14 +353,14 @@ async fn resources_round_trip_through_rewritten_uris() {
     let fake = fake_with_tools(&[]);
     let url = serve_fake(fake).await;
     let store: Arc<dyn CredentialStore> = Arc::new(MemoryStore::new());
-    let h = start(vec![http_upstream("web", &url, &[], &store)]).await;
+    let harness = start(vec![http_upstream("web", &url, &[], &store)]).await;
 
-    let resources = h.client.peer().list_all_resources().await.unwrap();
+    let resources = harness.client.peer().list_all_resources().await.unwrap();
     assert_eq!(resources.len(), 1);
     let exposed = resources[0].uri.clone();
     assert!(exposed.starts_with("toolward://web/"), "{exposed}");
 
-    let read = h
+    let read = harness
         .client
         .peer()
         .read_resource(ReadResourceRequestParams::new(exposed.clone()))
@@ -374,7 +374,7 @@ async fn resources_round_trip_through_rewritten_uris() {
         other => panic!("unexpected {other:?}"),
     }
 
-    let err = h
+    let err = harness
         .client
         .peer()
         .read_resource(ReadResourceRequestParams::new("file:///etc/passwd"))
@@ -388,13 +388,13 @@ async fn prompts_get_the_server_prefix() {
     let fake = fake_with_tools(&[]);
     let url = serve_fake(fake).await;
     let store: Arc<dyn CredentialStore> = Arc::new(MemoryStore::new());
-    let h = start(vec![http_upstream("web", &url, &[], &store)]).await;
+    let harness = start(vec![http_upstream("web", &url, &[], &store)]).await;
 
-    let prompts = h.client.peer().list_all_prompts().await.unwrap();
+    let prompts = harness.client.peer().list_all_prompts().await.unwrap();
     assert_eq!(prompts.len(), 1);
     assert_eq!(prompts[0].name, "web__greet");
 
-    let got = h
+    let got = harness
         .client
         .peer()
         .get_prompt(GetPromptRequestParams::new("web__greet"))
@@ -412,7 +412,7 @@ async fn a_failing_http_upstream_is_skipped_and_never_leaks_the_secret() {
     *bad.fail_with.lock().unwrap() = Some(500);
     let bad_url = serve_fake(Arc::clone(&bad)).await;
     let store: Arc<dyn CredentialStore> = Arc::new(MemoryStore::with(&[("tok", "s3cr3t")]));
-    let h = start(vec![
+    let harness = start(vec![
         http_upstream("good", &good_url, &[], &store),
         http_upstream(
             "bad",
@@ -423,11 +423,11 @@ async fn a_failing_http_upstream_is_skipped_and_never_leaks_the_secret() {
     ])
     .await;
 
-    let tools = h.client.peer().list_all_tools().await.unwrap();
+    let tools = harness.client.peer().list_all_tools().await.unwrap();
     let names: Vec<String> = tools.iter().map(|t| t.name.to_string()).collect();
     assert_eq!(names, ["good__echo"]);
 
-    let err = h
+    let err = harness
         .client
         .peer()
         .call_tool(CallToolRequestParams::new("bad__hidden"))
@@ -449,7 +449,7 @@ async fn a_missing_secret_makes_the_upstream_unavailable() {
     let fake = fake_with_tools(&["echo"]);
     let url = serve_fake(Arc::clone(&fake)).await;
     let store: Arc<dyn CredentialStore> = Arc::new(MemoryStore::new());
-    let h = start(vec![http_upstream(
+    let harness = start(vec![http_upstream(
         "web",
         &url,
         &[("Authorization", "Bearer ${keychain:absent}")],
@@ -457,8 +457,16 @@ async fn a_missing_secret_makes_the_upstream_unavailable() {
     )])
     .await;
 
-    assert!(h.client.peer().list_all_tools().await.unwrap().is_empty());
-    let err = h
+    assert!(
+        harness
+            .client
+            .peer()
+            .list_all_tools()
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let err = harness
         .client
         .peer()
         .call_tool(CallToolRequestParams::new("web__echo"))
@@ -474,7 +482,7 @@ async fn errors_after_the_handshake_are_redacted() {
     let fake = fake_with_tools(&["echo"]);
     let url = serve_fake(Arc::clone(&fake)).await;
     let store: Arc<dyn CredentialStore> = Arc::new(MemoryStore::with(&[("tok", "s3cr3t")]));
-    let h = start(vec![http_upstream(
+    let harness = start(vec![http_upstream(
         "web",
         &url,
         &[("Authorization", "Bearer ${keychain:tok}")],
@@ -482,9 +490,12 @@ async fn errors_after_the_handshake_are_redacted() {
     )])
     .await;
 
-    assert_eq!(h.client.peer().list_all_tools().await.unwrap().len(), 1);
+    assert_eq!(
+        harness.client.peer().list_all_tools().await.unwrap().len(),
+        1
+    );
     *fake.fail_with.lock().unwrap() = Some(500);
-    let err = h
+    let err = harness
         .client
         .peer()
         .call_tool(CallToolRequestParams::new("web__echo"))
@@ -500,9 +511,9 @@ async fn a_tool_listed_twice_is_exposed_once() {
     let fake = fake_with_tools(&["dup", "dup", "other"]);
     let url = serve_fake(fake).await;
     let store: Arc<dyn CredentialStore> = Arc::new(MemoryStore::new());
-    let h = start(vec![http_upstream("web", &url, &[], &store)]).await;
+    let harness = start(vec![http_upstream("web", &url, &[], &store)]).await;
 
-    let tools = h.client.peer().list_all_tools().await.unwrap();
+    let tools = harness.client.peer().list_all_tools().await.unwrap();
     let names: Vec<String> = tools.iter().map(|t| t.name.to_string()).collect();
     assert_eq!(names, ["web__dup", "web__other"]);
 }
@@ -512,9 +523,9 @@ async fn the_handshake_offers_a_version_that_has_initialize() {
     let fake = fake_with_tools(&[]);
     let url = serve_fake(Arc::clone(&fake)).await;
     let store: Arc<dyn CredentialStore> = Arc::new(MemoryStore::new());
-    let h = start(vec![http_upstream("web", &url, &[], &store)]).await;
+    let harness = start(vec![http_upstream("web", &url, &[], &store)]).await;
 
-    h.client.peer().list_all_tools().await.unwrap();
+    harness.client.peer().list_all_tools().await.unwrap();
     // rmcp's default, 2026-07-28, has no initialize; GitHub's server rejects it.
     assert_eq!(*fake.versions.lock().unwrap(), ["2025-11-25"]);
 }
@@ -525,9 +536,9 @@ async fn a_legacy_server_that_fails_the_probe_with_a_5xx_is_still_reached() {
     *fake.discover_status.lock().unwrap() = Some(500);
     let url = serve_fake(Arc::clone(&fake)).await;
     let store: Arc<dyn CredentialStore> = Arc::new(MemoryStore::new());
-    let h = start(vec![http_upstream("web", &url, &[], &store)]).await;
+    let harness = start(vec![http_upstream("web", &url, &[], &store)]).await;
 
-    let tools = h.client.peer().list_all_tools().await.unwrap();
+    let tools = harness.client.peer().list_all_tools().await.unwrap();
     assert_eq!(tools.len(), 1);
     assert_eq!(*fake.versions.lock().unwrap(), ["2025-11-25"]);
 }
@@ -560,16 +571,16 @@ async fn with_silent_upstream() -> Harness {
 async fn a_silent_upstream_does_not_hold_up_any_listing() {
     let limit = std::time::Duration::from_secs(10);
 
-    let h = with_silent_upstream().await;
+    let harness = with_silent_upstream().await;
     let started = std::time::Instant::now();
-    let tools = h.client.peer().list_all_tools().await.unwrap();
+    let tools = harness.client.peer().list_all_tools().await.unwrap();
     assert!(started.elapsed() < limit);
     assert_eq!(tools.len(), 1);
     assert!(tools.iter().all(|t| t.name.starts_with("fast__")));
 
-    let h = with_silent_upstream().await;
+    let harness = with_silent_upstream().await;
     let started = std::time::Instant::now();
-    let resources = h.client.peer().list_all_resources().await.unwrap();
+    let resources = harness.client.peer().list_all_resources().await.unwrap();
     assert!(started.elapsed() < limit);
     assert_eq!(resources.len(), 1);
     assert!(
@@ -578,9 +589,9 @@ async fn a_silent_upstream_does_not_hold_up_any_listing() {
             .all(|r| r.uri.starts_with("toolward://fast/"))
     );
 
-    let h = with_silent_upstream().await;
+    let harness = with_silent_upstream().await;
     let started = std::time::Instant::now();
-    let prompts = h.client.peer().list_all_prompts().await.unwrap();
+    let prompts = harness.client.peer().list_all_prompts().await.unwrap();
     assert!(started.elapsed() < limit);
     assert_eq!(prompts.len(), 1);
     assert!(prompts.iter().all(|p| p.name.starts_with("fast__")));
