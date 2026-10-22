@@ -647,6 +647,11 @@ async fn check_tools_lists_exposed_names_and_flags_failures() {
     let text = String::from_utf8(out).unwrap();
     assert!(!all_listed);
     assert!(text.contains("fast__ping"), "{text}");
+    assert!(text.contains("server: fake-http 0"), "{text}");
+    assert!(
+        text.contains("capabilities: prompts, resources, tools"),
+        "{text}"
+    );
     assert!(
         text.contains(&format!("(renamed from {LONG_TOOL:?})")),
         "{text}"
