@@ -11,7 +11,11 @@ use http::{HeaderName, HeaderValue};
 use rmcp::ServiceExt;
 use rmcp::handler::client::ClientHandler;
 use rmcp::model::{ClientConfig, Implementation, ProtocolVersion, Tool};
-use rmcp::service::{NotificationContext, Peer, RoleClient, RoleServer, RunningService};
+use rmcp::service::{
+    ClientInitializeError, ClientLifecycleMode, ClientServiceExt, NotificationContext, Peer,
+    RoleClient, RoleServer, RunningService,
+};
+use rmcp::transport::IntoTransport;
 use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
 use rmcp::transport::{StreamableHttpClientTransport, TokioChildProcess};
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -97,6 +101,44 @@ impl UpstreamHandler {
         *self.shared.secrets.lock().unwrap() = secrets.to_vec();
     }
 
+    /// Connects to an HTTP server with the stateless protocol
+    /// (`server/discover`) and falls back to the `initialize` handshake when
+    /// the server does not answer it, so both old and new servers work.
+    ///
+    /// rmcp falls back only on a JSON-RPC error or a 4xx without a challenge.
+    /// Other probe failures (a 5xx, an HTML page, a 401 without a challenge)
+    /// would reject a legacy server that `initialize` can reach, so any
+    /// failure that is not about authorization is retried once with the plain
+    /// handshake on a fresh transport. The error of that retry is returned.
+    ///
+    /// Stdio servers do not use this: with rmcp 3.5.1 the probe is sometimes
+    /// never answered over a child process, which costs 10 s per connection.
+    pub async fn connect_http<T, E, A>(
+        self,
+        make_transport: impl Fn() -> T,
+    ) -> Result<RunningClient, Box<ClientInitializeError>>
+    where
+        T: IntoTransport<RoleClient, E, A>,
+        E: std::error::Error + Send + Sync + 'static,
+    {
+        let lifecycle = ClientLifecycleMode::Auto {
+            preferred_versions: vec![ProtocolVersion::LATEST],
+            legacy_version: Some(ProtocolVersion::LATEST_WITH_INITIALIZE),
+        };
+        match self
+            .clone()
+            .serve_with_lifecycle(make_transport(), lifecycle)
+            .await
+        {
+            Ok(client) => Ok(client),
+            Err(err) if err.is_authorization_required() => Err(Box::new(err)),
+            Err(_) => self
+                .serve_with_lifecycle(make_transport(), ClientLifecycleMode::Initialize)
+                .await
+                .map_err(Box::new),
+        }
+    }
+
     /// Adds secrets that appeared after the connection was made, such as a
     /// token the connector refreshed.
     pub fn add_secrets(&self, secrets: &[String]) {
@@ -110,9 +152,10 @@ impl UpstreamHandler {
 }
 
 impl ClientHandler for UpstreamHandler {
-    /// Offers the newest version that still has the `initialize` handshake.
-    /// rmcp's default, 2026-07-28, has none, and servers such as GitHub's then
-    /// answer `initialize` but reject the follow-up with "invalid session".
+    /// The version offered when the server needs the `initialize` handshake
+    /// (stdio servers, and the fallback of `connect_http`). rmcp's default, 2026-07-28, has none, and a legacy
+    /// server such as GitHub's once was would answer `initialize` but reject
+    /// the follow-up with "invalid session".
     fn get_info(&self) -> ClientConfig {
         let mut info = ClientConfig::default();
         info.protocol_version = ProtocolVersion::LATEST_WITH_INITIALIZE;
@@ -587,10 +630,9 @@ impl Connect for HttpConnector {
             handler.remember_secrets(&secrets);
             let config = StreamableHttpClientTransportConfig::with_uri(self.spec.url.as_str())
                 .custom_headers(headers);
-            let transport = StreamableHttpClientTransport::from_config(config);
             // The server controls this error text and may echo headers back.
             handler
-                .serve(transport)
+                .connect_http(|| StreamableHttpClientTransport::from_config(config.clone()))
                 .await
                 .map_err(|err| redact(&format!("handshake failed: {err}"), &secrets))
         })

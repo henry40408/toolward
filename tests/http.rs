@@ -27,6 +27,8 @@ struct Fake {
     fail_with: Mutex<Option<u16>>,
     /// protocolVersion of each initialize request.
     versions: Mutex<Vec<String>>,
+    /// Answer `server/discover` with this HTTP status instead of a JSON-RPC error.
+    discover_status: Mutex<Option<u16>>,
 }
 
 async fn read_request(
@@ -164,6 +166,16 @@ async fn serve_fake(fake: Arc<Fake>) -> String {
                     return respond(&mut stream, 202, "").await;
                 };
                 let method = message["method"].as_str().unwrap_or_default();
+                // A legacy server does not know the stateless probe.
+                if method == "server/discover" {
+                    let discover_status = *fake.discover_status.lock().unwrap();
+                    if let Some(status) = discover_status {
+                        return respond(&mut stream, status, "unavailable").await;
+                    }
+                    let error = json!({"code": -32601, "message": "Method not found"});
+                    let reply = json!({"jsonrpc": "2.0", "id": id, "error": error});
+                    return respond(&mut stream, 200, &reply.to_string()).await;
+                }
                 let result = result_for(&fake, method, &message["params"], &authorization);
                 let reply = json!({"jsonrpc": "2.0", "id": id, "result": result});
                 respond(&mut stream, 200, &reply.to_string()).await;
@@ -504,6 +516,19 @@ async fn the_handshake_offers_a_version_that_has_initialize() {
 
     h.client.peer().list_all_tools().await.unwrap();
     // rmcp's default, 2026-07-28, has no initialize; GitHub's server rejects it.
+    assert_eq!(*fake.versions.lock().unwrap(), ["2025-11-25"]);
+}
+
+#[tokio::test]
+async fn a_legacy_server_that_fails_the_probe_with_a_5xx_is_still_reached() {
+    let fake = fake_with_tools(&["echo"]);
+    *fake.discover_status.lock().unwrap() = Some(500);
+    let url = serve_fake(Arc::clone(&fake)).await;
+    let store: Arc<dyn CredentialStore> = Arc::new(MemoryStore::new());
+    let h = start(vec![http_upstream("web", &url, &[], &store)]).await;
+
+    let tools = h.client.peer().list_all_tools().await.unwrap();
+    assert_eq!(tools.len(), 1);
     assert_eq!(*fake.versions.lock().unwrap(), ["2025-11-25"]);
 }
 
