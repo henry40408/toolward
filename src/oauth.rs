@@ -266,6 +266,24 @@ fn effective_scopes(
     scopes
 }
 
+/// Expands the `${keychain:...}` references in `text` off the async threads
+/// (the keychain blocks). Returns the value and the secrets that went into it.
+async fn expand_in_background(
+    store: &Arc<dyn CredentialStore>,
+    text: &str,
+) -> Result<(String, Vec<String>), String> {
+    let text = text.to_owned();
+    let store = Arc::clone(store);
+    tokio::task::spawn_blocking(move || {
+        let mut found = Vec::new();
+        interpolate::expand_collecting(&text, store.as_ref(), &mut found)
+            .map(|value| (value, found))
+    })
+    .await
+    .map_err(|err| err.to_string())?
+    .map_err(|err| err.to_string())
+}
+
 /// What `connect` needs for an OAuth server.
 pub struct OAuthSpec {
     pub server: String,
@@ -289,6 +307,43 @@ impl OAuthConnector {
             "not logged in: run `toolward auth login {}`",
             self.spec.server
         )
+    }
+
+    fn expired_hint(&self) -> String {
+        format!(
+            "the login has expired: run `toolward auth login {}`",
+            self.spec.server
+        )
+    }
+
+    /// The client secret to refresh with, and every secret to mask. A secret
+    /// in the config wins; the stored client record is read only without one.
+    async fn client_secret_for(
+        &self,
+        token_client_id: &str,
+    ) -> Result<(Option<String>, Vec<String>), String> {
+        let mut secrets = Vec::new();
+        let configured = match &self.spec.client_secret {
+            Some(text) => {
+                let (value, found) = expand_in_background(&self.store, text).await?;
+                secrets.extend(found);
+                Some(value)
+            }
+            None => None,
+        };
+        let record = if configured.is_some() {
+            None
+        } else {
+            let store = Arc::clone(&self.store);
+            let server = self.spec.server.clone();
+            tokio::task::spawn_blocking(move || read_client_record_lenient(store.as_ref(), &server))
+                .await
+                .map_err(|err| err.to_string())?
+        };
+        let (client_secret, mask) =
+            resolve_client_secret(configured, record.as_ref(), token_client_id);
+        secrets.extend(mask);
+        Ok((client_secret, secrets))
     }
 }
 
@@ -323,39 +378,7 @@ impl Connect for OAuthConnector {
                 return Err(self.login_hint());
             };
 
-            let mut secrets = Vec::new();
-            let client_secret = match &self.spec.client_secret {
-                Some(text) => {
-                    let text = text.clone();
-                    let store = Arc::clone(&self.store);
-                    let (value, found) = tokio::task::spawn_blocking(move || {
-                        let mut found = Vec::new();
-                        interpolate::expand_collecting(&text, store.as_ref(), &mut found)
-                            .map(|value| (value, found))
-                    })
-                    .await
-                    .map_err(|err| err.to_string())?
-                    .map_err(|err| err.to_string())?;
-                    secrets.extend(found);
-                    Some(value)
-                }
-                None => None,
-            };
-            // Only needed when the config gives no secret.
-            let record = if client_secret.is_some() {
-                None
-            } else {
-                let store = Arc::clone(&self.store);
-                let server = self.spec.server.clone();
-                tokio::task::spawn_blocking(move || {
-                    read_client_record_lenient(store.as_ref(), &server)
-                })
-                .await
-                .map_err(|err| err.to_string())?
-            };
-            let (client_secret, mask) =
-                resolve_client_secret(client_secret, record.as_ref(), &stored.client_id);
-            secrets.extend(mask);
+            let (client_secret, mut secrets) = self.client_secret_for(&stored.client_id).await?;
 
             let mut manager = AuthorizationManager::new(self.spec.url.as_str())
                 .await
@@ -379,12 +402,7 @@ impl Connect for OAuthConnector {
             // refresh the server rejects is reported as a login problem.
             match manager.get_access_token().await {
                 Ok(token) => secrets.push(token),
-                Err(AuthError::AuthorizationRequired) => {
-                    return Err(format!(
-                        "the login has expired: run `toolward auth login {}`",
-                        self.spec.server
-                    ));
-                }
+                Err(AuthError::AuthorizationRequired) => return Err(self.expired_hint()),
                 Err(err) => return Err(auth_failure(&err, &secrets)),
             }
             // Both tokens, as they are after any refresh, must never reach the agent.
@@ -408,6 +426,83 @@ impl Connect for OAuthConnector {
     }
 }
 
+/// Expands `text` when there is one, discarding the secrets that went into it.
+async fn expand_optional(
+    store: &Arc<dyn CredentialStore>,
+    text: Option<&str>,
+) -> Result<Option<String>, String> {
+    let Some(text) = text else {
+        return Ok(None);
+    };
+    let (value, _) = expand_in_background(store, text).await?;
+    Ok(Some(value))
+}
+
+/// What `register_or_preregister` needs. `secrets` gains a client secret the
+/// server issues, so that later errors mask it.
+struct ClientSetup<'a> {
+    manager: &'a mut AuthorizationManager,
+    redirect_uri: &'a str,
+    scopes: &'a [String],
+    client_id: Option<String>,
+    client_secret: Option<String>,
+    secrets: &'a mut Vec<String>,
+}
+
+/// Builds the authorization request: with the configured client when there is
+/// one, else with a client registered here. Also returns the client record
+/// `serve` needs when the server issued one.
+async fn register_or_preregister(
+    setup: ClientSetup<'_>,
+) -> Result<(AuthorizationRequest, Option<ClientRecord>), String> {
+    let ClientSetup {
+        manager,
+        redirect_uri,
+        scopes,
+        client_id,
+        client_secret,
+        secrets,
+    } = setup;
+    let mut auth_request = AuthorizationRequest::new(redirect_uri.to_owned())
+        .with_scopes(scopes.to_vec())
+        .with_client_name("toolward");
+    if let Some(id) = client_id {
+        auth_request = auth_request.with_preregistered_client(id);
+        if let Some(secret) = client_secret {
+            auth_request = auth_request.with_client_secret(secret);
+        }
+        return Ok((auth_request, None));
+    }
+    // Register here instead of inside the session: the session drops the
+    // client secret that the server returns.
+    let scope_refs: Vec<&str> = scopes.iter().map(String::as_str).collect();
+    let config = manager
+        .register_client("toolward", redirect_uri, &scope_refs)
+        .await
+        .map_err(|err| auth_failure(&err, secrets))?;
+    if let Some(secret) = config.client_secret.clone() {
+        secrets.push(secret.clone());
+        auth_request = auth_request.with_client_secret(secret);
+    }
+    auth_request = auth_request.with_preregistered_client(config.client_id.clone());
+    let registered = registration_record(config.client_id, config.client_secret);
+    Ok((auth_request, registered))
+}
+
+/// Parses the URL the user is sent to. Only https is accepted, or http on loopback.
+fn validated_auth_url(raw: &str) -> Result<reqwest::Url, String> {
+    let auth_url = reqwest::Url::parse(raw)
+        .map_err(|_| "the server gave an invalid authorization URL".to_owned())?;
+    let loopback = matches!(
+        auth_url.host_str(),
+        Some("localhost" | "127.0.0.1" | "[::1]")
+    );
+    if auth_url.scheme() != "https" && !(auth_url.scheme() == "http" && loopback) {
+        return Err("the server's authorization URL is not https".into());
+    }
+    Ok(auth_url)
+}
+
 /// Everything `auth login` needs to know about a server.
 pub struct LoginRequest<'a> {
     pub server: &'a str,
@@ -424,34 +519,8 @@ pub async fn login(
     timeout: Duration,
 ) -> Result<(), String> {
     let account = account_for(request.server)?;
-    let client_secret = match &request.oauth.client_secret {
-        Some(text) => {
-            let text = text.clone();
-            let store = Arc::clone(&store);
-            let value = tokio::task::spawn_blocking(move || {
-                interpolate::expand_collecting(&text, store.as_ref(), &mut Vec::new())
-            })
-            .await
-            .map_err(|err| err.to_string())?
-            .map_err(|err| err.to_string())?;
-            Some(value)
-        }
-        None => None,
-    };
-    let client_id = match &request.oauth.client_id {
-        Some(text) => {
-            let text = text.clone();
-            let store = Arc::clone(&store);
-            let value = tokio::task::spawn_blocking(move || {
-                interpolate::expand_collecting(&text, store.as_ref(), &mut Vec::new())
-            })
-            .await
-            .map_err(|err| err.to_string())?
-            .map_err(|err| err.to_string())?;
-            Some(value)
-        }
-        None => None,
-    };
+    let client_secret = expand_optional(&store, request.oauth.client_secret.as_deref()).await?;
+    let client_id = expand_optional(&store, request.oauth.client_id.as_deref()).await?;
     let mut secrets: Vec<String> = client_secret.iter().cloned().collect();
 
     // Bind first: the redirect URI must be known before registration.
@@ -475,45 +544,21 @@ pub async fn login(
     manager.set_metadata(metadata);
     let scopes = effective_scopes(&manager, &request.oauth.scopes, scopes_supported.as_deref());
 
-    let mut auth_request = AuthorizationRequest::new(redirect_uri.clone())
-        .with_scopes(scopes.clone())
-        .with_client_name("toolward");
-    // The client secret `serve` must use, when the server issued one.
-    let mut registered = None;
-    if let Some(id) = client_id {
-        auth_request = auth_request.with_preregistered_client(id);
-        if let Some(secret) = client_secret.clone() {
-            auth_request = auth_request.with_client_secret(secret);
-        }
-    } else {
-        // Register here instead of inside the session: the session drops the
-        // client secret that the server returns.
-        let scope_refs: Vec<&str> = scopes.iter().map(String::as_str).collect();
-        let config = manager
-            .register_client("toolward", &redirect_uri, &scope_refs)
-            .await
-            .map_err(|err| auth_failure(&err, &secrets))?;
-        if let Some(secret) = config.client_secret.clone() {
-            secrets.push(secret.clone());
-            auth_request = auth_request.with_client_secret(secret);
-        }
-        auth_request = auth_request.with_preregistered_client(config.client_id.clone());
-        registered = registration_record(config.client_id, config.client_secret);
-    }
+    let (auth_request, registered) = register_or_preregister(ClientSetup {
+        manager: &mut manager,
+        redirect_uri: &redirect_uri,
+        scopes: &scopes,
+        client_id,
+        client_secret,
+        secrets: &mut secrets,
+    })
+    .await?;
     let fail = |err: AuthError| auth_failure(&err, &secrets);
     let session = AuthorizationSession::new(manager, auth_request)
         .await
         .map_err(|(_, err)| fail(err))?;
 
-    let auth_url = reqwest::Url::parse(session.get_authorization_url())
-        .map_err(|_| "the server gave an invalid authorization URL".to_owned())?;
-    let loopback = matches!(
-        auth_url.host_str(),
-        Some("localhost" | "127.0.0.1" | "[::1]")
-    );
-    if auth_url.scheme() != "https" && !(auth_url.scheme() == "http" && loopback) {
-        return Err("the server's authorization URL is not https".into());
-    }
+    let auth_url = validated_auth_url(session.get_authorization_url())?;
     let state = auth_url
         .query_pairs()
         .find(|(key, _)| key == "state")
