@@ -162,7 +162,7 @@ async fn call_tool_cancellable(
     }
 }
 
-fn redacted_failure(reason: String) -> McpError {
+fn internal_failure(reason: String) -> McpError {
     McpError::internal_error(reason, None)
 }
 
@@ -307,23 +307,24 @@ impl ServerHandler for Proxy {
         let response = call_tool_cancellable(&peer, request, context.ct.cancelled())
             .await
             .map_err(|err| service_error(upstream, err))?;
-        // Upstreams on older protocol revisions omit `resultType`, which the
-        // 2026-07-28 revision spoken to the client requires.
-        let redact = |err| redacted_failure(err);
         Ok(match response {
             CallToolResponse::Complete(result) => {
-                let mut result = upstream.redact_result(result).map_err(redact)?;
+                let mut result = upstream.redact_result(result).map_err(internal_failure)?;
+                // Upstreams on older protocol revisions omit `resultType`, which the
+                // 2026-07-28 revision spoken to the client requires.
                 result.result_type.get_or_insert(ResultType::COMPLETE);
                 result.into()
             }
-            CallToolResponse::InputRequired(result) => {
-                upstream.redact_result(result).map_err(redact)?.into()
-            }
-            CallToolResponse::Task(result) => {
-                upstream.redact_result(result).map_err(redact)?.into()
-            }
+            CallToolResponse::InputRequired(result) => upstream
+                .redact_result(result)
+                .map_err(internal_failure)?
+                .into(),
+            CallToolResponse::Task(result) => upstream
+                .redact_result(result)
+                .map_err(internal_failure)?
+                .into(),
             // A variant added later cannot be inspected, so it is not passed on.
-            _ => return Err(redacted_failure("unsupported upstream result".into())),
+            _ => return Err(internal_failure("unsupported upstream result".into())),
         })
     }
 
@@ -383,7 +384,7 @@ impl ServerHandler for Proxy {
             .read_resource(request)
             .await
             .map_err(|err| service_error(upstream, err))?;
-        let mut result = upstream.redact_result(result).map_err(redacted_failure)?;
+        let mut result = upstream.redact_result(result).map_err(internal_failure)?;
         result.result_type.get_or_insert(ResultType::COMPLETE);
         for content in &mut result.contents {
             match content {
@@ -453,7 +454,7 @@ impl ServerHandler for Proxy {
             .get_prompt(request)
             .await
             .map_err(|err| service_error(upstream, err))?;
-        let mut result = upstream.redact_result(result).map_err(redacted_failure)?;
+        let mut result = upstream.redact_result(result).map_err(internal_failure)?;
         result.result_type.get_or_insert(ResultType::COMPLETE);
         Ok(result.into())
     }
