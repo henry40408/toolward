@@ -3,6 +3,8 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
+use rmcp::model::{ServerCapabilities, ServerPeerInfo};
+use serde_json::Value;
 
 use crate::config::{self, Config};
 use crate::names::SEPARATOR;
@@ -134,8 +136,9 @@ pub fn check(config: &Config, store: &dyn CredentialStore, out: &mut dyn Write) 
     Ok(all_present)
 }
 
-/// Connects to every upstream and prints the tool names the agent will see,
-/// marking those that were renamed. Returns `true` when all upstreams answered.
+/// Connects to every upstream and prints what it announced (protocol version,
+/// server, capabilities) and the tool names the agent will see, marking those
+/// that were renamed. Returns `true` when all upstreams answered.
 pub async fn check_tools(proxy: &Proxy, out: &mut dyn Write) -> Result<bool> {
     let mut all_listed = true;
     for upstream in proxy.upstreams() {
@@ -143,12 +146,18 @@ pub async fn check_tools(proxy: &Proxy, out: &mut dyn Write) -> Result<bool> {
         writeln!(out, "{name}")?;
         match upstream.tools().await {
             Ok(_) => {
+                if let Some(info) = upstream.list_peer().await.ok().and_then(|p| p.peer_info()) {
+                    for line in describe_server(&info) {
+                        writeln!(out, "  {}", upstream.redact(&line))?;
+                    }
+                }
+                writeln!(out, "  tools:")?;
                 for (exposed, original) in upstream.tool_names() {
                     let full = format!("{name}{SEPARATOR}{exposed}");
                     if exposed == original {
-                        writeln!(out, "  {full}")?;
+                        writeln!(out, "    {full}")?;
                     } else {
-                        writeln!(out, "  {full}  (renamed from {original:?})")?;
+                        writeln!(out, "    {full}  (renamed from {original:?})")?;
                     }
                 }
             }
@@ -160,6 +169,42 @@ pub async fn check_tools(proxy: &Proxy, out: &mut dyn Write) -> Result<bool> {
     }
     proxy.shutdown().await;
     Ok(all_listed)
+}
+
+/// The lines `check --tools` prints about what a server announced.
+fn describe_server(info: &ServerPeerInfo) -> Vec<String> {
+    let mut lines = vec![format!("protocol: {}", info.protocol_version)];
+    if let Some(server) = &info.server_info {
+        let text = format!("{} {}", server.name, server.version);
+        // Server text must not start a line of its own.
+        lines.push(format!("server: {}", text.replace(char::is_control, "?")));
+    }
+    lines.push(format!(
+        "capabilities: {}",
+        capability_names(&info.capabilities)
+    ));
+    lines
+}
+
+/// The capabilities and extensions a server declares, such as `tools` or
+/// `io.modelcontextprotocol/tasks`, sorted by name.
+fn capability_names(capabilities: &ServerCapabilities) -> String {
+    let Ok(Value::Object(fields)) = serde_json::to_value(capabilities) else {
+        return "(unreadable)".into();
+    };
+    let mut names: Vec<String> = Vec::new();
+    for (key, value) in fields {
+        match (key.as_str(), value) {
+            (_, Value::Null) => {}
+            ("extensions", Value::Object(extensions)) => names.extend(extensions.keys().cloned()),
+            (_, _) => names.push(key),
+        }
+    }
+    names.sort();
+    if names.is_empty() {
+        return "(none)".into();
+    }
+    names.join(", ")
 }
 
 /// Reads a secret without echoing it when stdin is a terminal; otherwise reads one line.
@@ -188,6 +233,20 @@ pub fn read_secret(account: &str) -> Result<String> {
 mod tests {
     use super::*;
     use crate::store::MemoryStore;
+
+    #[test]
+    fn capability_names_include_extensions_and_skip_unset_ones() {
+        let capabilities = ServerCapabilities::builder()
+            .enable_tools()
+            .enable_prompts()
+            .enable_tasks()
+            .build();
+        assert_eq!(
+            capability_names(&capabilities),
+            "io.modelcontextprotocol/tasks, prompts, tools"
+        );
+        assert_eq!(capability_names(&ServerCapabilities::default()), "(none)");
+    }
 
     const CONFIG: &str = r#"{"mcpServers": {
         "a": {"command": "x", "env": {"T": "${keychain:present}"}},
