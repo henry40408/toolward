@@ -2,6 +2,7 @@
 //! that answers every POST with a plain JSON body.
 
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use rmcp::ServiceExt;
 use rmcp::model::{
@@ -14,7 +15,7 @@ use tokio::net::TcpListener;
 
 use toolward::proxy::Proxy;
 use toolward::store::{CredentialStore, MemoryStore};
-use toolward::upstream::{HttpConnector, HttpSpec, Upstream};
+use toolward::upstream::{Connect, HttpConnector, HttpSpec, Hub, Upstream};
 
 const LONG_TOOL: &str = "create_pull_request_review_comment_thread_reply";
 
@@ -190,12 +191,48 @@ struct Harness {
     _server: RunningService<RoleServer, Proxy>,
 }
 
+/// An upstream that is built once the proxy's hub exists.
+struct Pending {
+    name: String,
+    connector: Box<dyn Connect>,
+    list_timeout: Option<Duration>,
+}
+
+impl Pending {
+    fn new(name: &str, connector: impl Connect + 'static) -> Self {
+        Self {
+            name: name.to_owned(),
+            connector: Box::new(connector),
+            list_timeout: None,
+        }
+    }
+
+    fn with_list_timeout(mut self, timeout: Duration) -> Self {
+        self.list_timeout = Some(timeout);
+        self
+    }
+
+    fn build(self, hub: &Arc<Hub>) -> Upstream {
+        let upstream = Upstream::new(self.name, self.connector, Arc::clone(hub));
+        match self.list_timeout {
+            Some(timeout) => upstream.with_list_timeout(timeout),
+            None => upstream,
+        }
+    }
+}
+
+fn proxy_of(pending: Vec<Pending>) -> Proxy {
+    let hub = Arc::new(Hub::default());
+    let upstreams = pending.into_iter().map(|p| p.build(&hub)).collect();
+    Proxy::new(hub, upstreams)
+}
+
 fn http_upstream(
     name: &str,
     url: &str,
     headers: &[(&str, &str)],
     store: &Arc<dyn CredentialStore>,
-) -> Upstream {
+) -> Pending {
     let spec = HttpSpec {
         url: url.to_owned(),
         headers: headers
@@ -203,11 +240,11 @@ fn http_upstream(
             .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
             .collect(),
     };
-    Upstream::new(name, Box::new(HttpConnector::new(spec, Arc::clone(store))))
+    Pending::new(name, HttpConnector::new(spec, Arc::clone(store)))
 }
 
-async fn start(upstreams: Vec<Upstream>) -> Harness {
-    let proxy = Proxy::new(upstreams);
+async fn start(upstreams: Vec<Pending>) -> Harness {
+    let proxy = proxy_of(upstreams);
     let (client_io, server_io) = tokio::io::duplex(1 << 16);
     let serving = tokio::spawn(async move { proxy.serve(server_io).await });
     let client = ().serve(client_io).await.expect("client handshake");
@@ -601,7 +638,7 @@ async fn a_silent_upstream_does_not_hold_up_any_listing() {
 async fn check_tools_lists_exposed_names_and_flags_failures() {
     let fast = serve_fake(fake_with_tools(&["ping", LONG_TOOL])).await;
     let store: Arc<dyn CredentialStore> = Arc::new(MemoryStore::new());
-    let proxy = Proxy::new(vec![
+    let proxy = proxy_of(vec![
         http_upstream("down", "http://127.0.0.1:1/mcp", &[], &store),
         http_upstream("fast", &fast, &[], &store),
     ]);

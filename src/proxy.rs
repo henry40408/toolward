@@ -35,14 +35,12 @@ pub struct Proxy {
 }
 
 impl Proxy {
-    pub fn new(upstreams: Vec<Upstream>) -> Self {
-        let hub = Arc::new(Hub::default());
+    /// `upstreams` must have been built with the same `hub`, or their
+    /// notifications never reach the agent.
+    pub fn new(hub: Arc<Hub>, upstreams: Vec<Upstream>) -> Self {
         let map = upstreams
             .into_iter()
-            .map(|upstream| {
-                upstream.attach(Arc::clone(&hub));
-                (upstream.name().to_owned(), Arc::new(upstream))
-            })
+            .map(|upstream| (upstream.name().to_owned(), Arc::new(upstream)))
             .collect();
         Self {
             upstreams: Arc::new(map),
@@ -52,6 +50,7 @@ impl Proxy {
 
     /// Builds the upstreams described by `config`. Nothing is started yet.
     pub fn from_config(config: &Config, store: &Arc<dyn CredentialStore>) -> Self {
+        let hub = Arc::new(Hub::default());
         let mut upstreams = Vec::new();
         for (name, server) in &config.mcp_servers {
             match server.transport() {
@@ -62,7 +61,7 @@ impl Proxy {
                         env: env.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
                     };
                     let connector = StdioConnector::new(name, spec, Arc::clone(store));
-                    upstreams.push(Upstream::new(name, Box::new(connector)));
+                    upstreams.push(Upstream::new(name, Box::new(connector), Arc::clone(&hub)));
                 }
                 Ok(Transport::Http {
                     url,
@@ -80,7 +79,7 @@ impl Proxy {
                             client_secret: oauth.client_secret.clone(),
                         };
                         let connector = OAuthConnector::new(spec, Arc::clone(store));
-                        upstreams.push(Upstream::new(name, Box::new(connector)));
+                        upstreams.push(Upstream::new(name, Box::new(connector), Arc::clone(&hub)));
                         continue;
                     }
                     let spec = HttpSpec {
@@ -91,12 +90,12 @@ impl Proxy {
                             .collect(),
                     };
                     let connector = HttpConnector::new(spec, Arc::clone(store));
-                    upstreams.push(Upstream::new(name, Box::new(connector)));
+                    upstreams.push(Upstream::new(name, Box::new(connector), Arc::clone(&hub)));
                 }
                 Err(reason) => log(format!("skipping {name:?}: {reason}")),
             }
         }
-        Self::new(upstreams)
+        Self::new(hub, upstreams)
     }
 
     /// The upstreams, for `toolward check`.

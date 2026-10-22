@@ -3,6 +3,7 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use rmcp::ServiceExt;
 use rmcp::model::{CallToolRequestParams, CallToolResult};
@@ -11,7 +12,7 @@ use serde_json::json;
 
 use toolward::proxy::Proxy;
 use toolward::store::{CredentialStore, MemoryStore};
-use toolward::upstream::{StdioConnector, StdioSpec, Upstream};
+use toolward::upstream::{Connect, Hub, StdioConnector, StdioSpec, Upstream};
 
 fn fake_upstream_path() -> String {
     let bin = PathBuf::from(env!("CARGO_BIN_EXE_toolward"));
@@ -26,12 +27,48 @@ fn fake_upstream_path() -> String {
     path.to_string_lossy().into_owned()
 }
 
+/// An upstream that is built once the proxy's hub exists.
+struct Pending {
+    name: String,
+    connector: Box<dyn Connect>,
+    list_timeout: Option<Duration>,
+}
+
+impl Pending {
+    fn new(name: &str, connector: impl Connect + 'static) -> Self {
+        Self {
+            name: name.to_owned(),
+            connector: Box::new(connector),
+            list_timeout: None,
+        }
+    }
+
+    fn with_list_timeout(mut self, timeout: Duration) -> Self {
+        self.list_timeout = Some(timeout);
+        self
+    }
+
+    fn build(self, hub: &Arc<Hub>) -> Upstream {
+        let upstream = Upstream::new(self.name, self.connector, Arc::clone(hub));
+        match self.list_timeout {
+            Some(timeout) => upstream.with_list_timeout(timeout),
+            None => upstream,
+        }
+    }
+}
+
+fn proxy_of(pending: Vec<Pending>) -> Proxy {
+    let hub = Arc::new(Hub::default());
+    let upstreams = pending.into_iter().map(|p| p.build(&hub)).collect();
+    Proxy::new(hub, upstreams)
+}
+
 fn stdio(
     name: &str,
     command: &str,
     env: &[(&str, &str)],
     store: &Arc<dyn CredentialStore>,
-) -> Upstream {
+) -> Pending {
     let spec = StdioSpec {
         command: command.to_owned(),
         args: vec![],
@@ -40,10 +77,7 @@ fn stdio(
             .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
             .collect(),
     };
-    Upstream::new(
-        name,
-        Box::new(StdioConnector::new(name, spec, Arc::clone(store))),
-    )
+    Pending::new(name, StdioConnector::new(name, spec, Arc::clone(store)))
 }
 
 struct Harness {
@@ -52,8 +86,8 @@ struct Harness {
     proxy: Proxy,
 }
 
-async fn start(upstreams: Vec<Upstream>) -> Harness {
-    let proxy = Proxy::new(upstreams);
+async fn start(upstreams: Vec<Pending>) -> Harness {
+    let proxy = proxy_of(upstreams);
     let (client_io, server_io) = tokio::io::duplex(1 << 16);
     let serving = {
         let proxy = proxy.clone();
@@ -208,7 +242,7 @@ async fn a_slow_listing_is_skipped() {
         &[("FAKE_LIST_DELAY_MS", "30000")],
         &store,
     )
-    .with_list_timeout(std::time::Duration::from_millis(1500));
+    .with_list_timeout(Duration::from_millis(1500));
     let fast = stdio("fast", &fake_upstream_path(), &[], &store);
     let harness = start(vec![slow, fast]).await;
 
