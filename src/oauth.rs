@@ -9,7 +9,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use rmcp::ServiceExt;
 use rmcp::transport::StreamableHttpClientTransport;
 use rmcp::transport::auth::{
     AuthClient, AuthError, AuthorizationManager, AuthorizationRequest, AuthorizationSession,
@@ -399,9 +398,10 @@ impl Connect for OAuthConnector {
 
             let client = AuthClient::new(reqwest::Client::default(), manager);
             let config = StreamableHttpClientTransportConfig::with_uri(self.spec.url.as_str());
-            let transport = StreamableHttpClientTransport::with_client(client, config);
             handler
-                .serve(transport)
+                .connect_http(|| {
+                    StreamableHttpClientTransport::with_client(client.clone(), config.clone())
+                })
                 .await
                 .map_err(|err| redact(&format!("handshake failed: {err}"), &secrets))
         })
