@@ -17,7 +17,25 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  lint:
+    name: lint (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Reads the pinned version and components from rust-toolchain.toml.
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets --locked -- -D warnings
+
   test:
+    name: test (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
@@ -33,15 +51,58 @@ jobs:
       - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
         with:
           tool: cargo-nextest
-      - run: cargo fmt --check
-      - run: cargo clippy --all-targets --locked -- -D warnings
       - run: cargo nextest run --locked
       - run: cargo test --doc --locked
 
+  coverage:
+    name: coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Reads the pinned version and components from rust-toolchain.toml.
+      - run: rustup toolchain install
+      # cargo-llvm-cov installs llvm-tools-preview itself.
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
+        with:
+          tool: cargo-llvm-cov,nextest
+      - name: Collect coverage (llvm source-based, via nextest)
+        run: cargo llvm-cov nextest --locked --lcov --output-path lcov.info
+      - name: Upload to Codecov
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: lcov.info
+          # Coverage is a signal, not a gate.
+          fail_ci_if_error: false
+
   deny:
+    name: deny
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+
+  lint-workflow:
+    name: lint-workflow
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # install-action has no actionlint manifest, so download the release and
+      # verify its checksum.
+      - name: Install actionlint
+        env:
+          ACTIONLINT_VERSION: 1.7.12
+          ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+        run: |
+          archive="actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          curl -sSfL -o "$archive" "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/${archive}"
+          echo "${ACTIONLINT_SHA256}  ${archive}" | sha256sum --check
+          tar -xzf "$archive" actionlint
+      - run: ./actionlint
