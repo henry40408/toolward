@@ -196,20 +196,45 @@ fn capability_names(capabilities: &ServerCapabilities) -> String {
     names.join(", ")
 }
 
+const GREEN: &str = "\x1b[32m";
+const RED: &str = "\x1b[31m";
+const DIM: &str = "\x1b[2m";
+const RESET: &str = "\x1b[0m";
+
+/// Wraps `text` in an ANSI color when `color` is on.
+fn paint(color: bool, code: &str, text: &str) -> String {
+    if color {
+        format!("{code}{text}{RESET}")
+    } else {
+        text.to_owned()
+    }
+}
+
+/// Whether to color the report: only on a terminal, and not when the user
+/// set `NO_COLOR` (<https://no-color.org>).
+pub fn wants_color(stdout_is_terminal: bool, no_color: Option<&std::ffi::OsStr>) -> bool {
+    stdout_is_terminal && no_color.is_none_or(|value| value.is_empty())
+}
+
 /// Prints one block per server and a summary line.
-/// `tools_checked` tells whether `check_tools` ran.
+/// `tools_checked` tells whether `check_tools` ran; `color` adds ANSI colors.
 pub fn render(
     reports: &[ServerReport],
     tools_checked: bool,
+    color: bool,
     out: &mut dyn Write,
 ) -> io::Result<()> {
     for report in reports {
         writeln!(out, "{}", report.name)?;
         for finding in &report.findings {
-            let mark = if finding.ok { "✓" } else { "✗" };
+            let mark = if finding.ok {
+                paint(color, GREEN, "✓")
+            } else {
+                paint(color, RED, "✗")
+            };
             writeln!(out, "  {mark} {}", finding.text)?;
             if let Some(fix) = &finding.fix {
-                writeln!(out, "      fix: {fix}")?;
+                writeln!(out, "      {}", paint(color, DIM, &format!("fix: {fix}")))?;
             }
         }
         for tool in &report.tools {
@@ -255,7 +280,7 @@ mod tests {
         let store = MemoryStore::with(&[("present", "TOPSECRET")]);
         let reports = check_secrets(&Config::parse(CONFIG).unwrap(), &store);
         let mut out = Vec::new();
-        render(&reports, tools_checked, &mut out).unwrap();
+        render(&reports, tools_checked, false, &mut out).unwrap();
         (all_ok(&reports), String::from_utf8(out).unwrap())
     }
 
@@ -298,6 +323,27 @@ mod tests {
         );
         let (_, text) = rendered(true);
         assert!(text.ends_with("3 servers, 1 with problem\n"), "{text}");
+    }
+
+    #[test]
+    fn color_marks_the_status_and_leaves_the_text_readable() {
+        let store = MemoryStore::with(&[("present", "x")]);
+        let reports = check_secrets(&Config::parse(CONFIG).unwrap(), &store);
+        let mut out = Vec::new();
+        render(&reports, true, true, &mut out).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("\x1b[32m✓\x1b[0m present"), "{text}");
+        assert!(text.contains("\x1b[31m✗\x1b[0m absent missing"), "{text}");
+        assert!(rendered(true).1.find('\x1b').is_none());
+    }
+
+    #[test]
+    fn color_needs_a_terminal_and_no_no_color() {
+        use std::ffi::OsStr;
+        assert!(wants_color(true, None));
+        assert!(wants_color(true, Some(OsStr::new(""))));
+        assert!(!wants_color(true, Some(OsStr::new("1"))));
+        assert!(!wants_color(false, None));
     }
 
     #[test]

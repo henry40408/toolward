@@ -645,7 +645,7 @@ async fn check_tools_lists_exposed_names_and_flags_failures() {
     let mut reports = Vec::new();
     toolward::check::check_tools(&proxy, &mut reports).await;
     let mut out = Vec::new();
-    toolward::check::render(&reports, true, &mut out).unwrap();
+    toolward::check::render(&reports, true, false, &mut out).unwrap();
     let text = String::from_utf8(out).unwrap();
     assert!(!toolward::check::all_ok(&reports));
     assert!(text.contains("fast__ping"), "{text}");
