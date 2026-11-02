@@ -1,4 +1,4 @@
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use std::path::Path;
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -120,7 +120,11 @@ fn run_check(config_path: &Path, tools: bool, out: &mut dyn Write) -> Result<Exi
         let proxy = Proxy::from_config(&config, &store);
         new_runtime()?.block_on(check::check_tools(&proxy, &mut reports));
     }
-    check::render(&reports, tools, out)?;
+    let color = check::wants_color(
+        io::stdout().is_terminal(),
+        std::env::var_os("NO_COLOR").as_deref(),
+    );
+    check::render(&reports, tools, color, out)?;
     Ok(if check::all_ok(&reports) {
         ExitCode::SUCCESS
     } else {
