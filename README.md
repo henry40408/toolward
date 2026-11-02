@@ -58,6 +58,7 @@ cargo install --path . --locked
    ```sh
    toolward check            # config is valid, which secrets are missing
    toolward check --tools    # also connect: show protocol, server, capabilities and tool names
+   toolward check --format json   # the same facts as one JSON object, for scripts
    ```
 
    ```json
