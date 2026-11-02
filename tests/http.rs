@@ -658,4 +658,29 @@ async fn check_tools_lists_exposed_names_and_flags_failures() {
     );
     assert!(text.contains("✗ tools unavailable"), "{text}");
     assert!(text.contains("1 with problem"), "{text}");
+
+    let mut out = Vec::new();
+    toolward::check::render_json(&reports, &mut out).unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(json["ok"], false);
+    let servers = json["servers"].as_array().unwrap();
+    let find = |name: &str| servers.iter().find(|s| s["name"] == name).unwrap();
+    let fast = &find("fast")["upstream"];
+    assert_eq!(fast["status"], "ok");
+    assert_eq!(fast["server"], "fake-http 0");
+    assert_eq!(
+        fast["capabilities"],
+        serde_json::json!(["prompts", "resources", "tools"])
+    );
+    let tools = fast["tools"].as_array().unwrap();
+    assert!(tools.contains(&serde_json::json!({"name": "fast__ping", "original": "ping"})));
+    assert!(
+        tools
+            .iter()
+            .any(|tool| tool["original"] == LONG_TOOL
+                && tool["name"] != format!("fast__{LONG_TOOL}"))
+    );
+    let down = &find("down")["upstream"];
+    assert_eq!(down["status"], "error");
+    assert!(down["reason"].is_string());
 }

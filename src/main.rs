@@ -8,7 +8,7 @@ use clap::Parser;
 use rmcp::ServiceExt;
 
 use toolward::check;
-use toolward::cli::{self, AuthCommand, Cli, Command, SecretCommand};
+use toolward::cli::{self, AuthCommand, Cli, Command, OutputFormat, SecretCommand};
 use toolward::config::Config;
 use toolward::import;
 use toolward::proxy::Proxy;
@@ -41,7 +41,9 @@ fn run(cli: Cli) -> Result<ExitCode> {
         }
         Command::Auth(AuthCommand::Logout { server }) => run_auth_logout(server, &mut out)?,
         Command::Import { file, apply } => run_import(&cli, file, *apply, &mut out)?,
-        Command::Check { tools } => run_check(&cli.config_path()?, *tools, &mut out)?,
+        Command::Check { tools, format } => {
+            run_check(&cli.config_path()?, *tools, *format, &mut out)?
+        }
         Command::Serve => unreachable!("handled above"),
     };
     out.flush()?;
@@ -111,7 +113,12 @@ fn run_import(cli: &Cli, file: &Path, apply: bool, out: &mut dyn Write) -> Resul
     Ok(ExitCode::SUCCESS)
 }
 
-fn run_check(config_path: &Path, tools: bool, out: &mut dyn Write) -> Result<ExitCode> {
+fn run_check(
+    config_path: &Path,
+    tools: bool,
+    format: OutputFormat,
+    out: &mut dyn Write,
+) -> Result<ExitCode> {
     let config = Config::load(config_path)?;
     let store = CachedStore::new(KeyringStore::native()?);
     let mut reports = check::check_secrets(&config, &store);
@@ -120,11 +127,16 @@ fn run_check(config_path: &Path, tools: bool, out: &mut dyn Write) -> Result<Exi
         let proxy = Proxy::from_config(&config, &store);
         new_runtime()?.block_on(check::check_tools(&proxy, &mut reports));
     }
-    let color = check::wants_color(
-        io::stdout().is_terminal(),
-        std::env::var_os("NO_COLOR").as_deref(),
-    );
-    check::render(&reports, tools, color, out)?;
+    match format {
+        OutputFormat::Json => check::render_json(&reports, out)?,
+        OutputFormat::Text => {
+            let color = check::wants_color(
+                io::stdout().is_terminal(),
+                std::env::var_os("NO_COLOR").as_deref(),
+            );
+            check::render(&reports, tools, color, out)?;
+        }
+    }
     Ok(if check::all_ok(&reports) {
         ExitCode::SUCCESS
     } else {

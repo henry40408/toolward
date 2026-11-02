@@ -2,7 +2,7 @@ use std::io::{self, IsTerminal, Read, Write};
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 
 use crate::config;
 use crate::store::{CredentialStore, validate_user_account};
@@ -39,9 +39,19 @@ pub enum Command {
         /// Also connect to every server and list the tool names the agent will see
         #[arg(long)]
         tools: bool,
+        /// `json` prints one JSON object for programs, never colored
+        #[arg(long, value_enum, default_value_t)]
+        format: OutputFormat,
     },
     /// Run the MCP proxy on stdio (this is what an agent's mcp.json should launch)
     Serve,
+}
+
+#[derive(Debug, Clone, Copy, Default, ValueEnum)]
+pub enum OutputFormat {
+    #[default]
+    Text,
+    Json,
 }
 
 #[derive(Debug, Subcommand)]
