@@ -1,4 +1,5 @@
 pub mod cache;
+pub mod check;
 pub mod cli;
 pub mod config;
 pub mod import;
