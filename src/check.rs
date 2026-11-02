@@ -461,7 +461,7 @@ fn plural<'a>(count: usize, one: &'a str, many: &'a str) -> &'a str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::MemoryStore;
+    use crate::store::{MemoryStore, StoreError};
 
     const CONFIG: &str = r#"{"mcpServers": {
         "a": {"command": "x", "env": {"T": "${keychain:present}"}},
@@ -568,6 +568,184 @@ mod tests {
         assert_eq!(servers[1]["secrets"][0]["status"], "missing");
         assert_eq!(servers[2]["secrets"], serde_json::json!([]));
         assert!(servers[0]["oauth"].is_null() && servers[0]["upstream"].is_null());
+    }
+
+    /// A store that answers every `get` the same way.
+    struct FixedStore(Result<Option<&'static str>, &'static str>);
+
+    impl CredentialStore for FixedStore {
+        fn get(&self, _account: &str) -> Result<Option<String>, StoreError> {
+            match self.0 {
+                Ok(secret) => Ok(secret.map(str::to_owned)),
+                Err(message) => Err(StoreError::Backend(message.to_owned())),
+            }
+        }
+
+        fn set(&self, _account: &str, _secret: &str) -> Result<(), StoreError> {
+            unreachable!("check never writes")
+        }
+
+        fn delete(&self, _account: &str) -> Result<bool, StoreError> {
+            unreachable!("check never writes")
+        }
+    }
+
+    const OAUTH_CONFIG: &str = r#"{"mcpServers": {
+        "s": {"url": "https://x/mcp", "oauth": {}},
+        "t": {"command": "x", "env": {"T": "${keychain:token}"}}
+    }}"#;
+
+    fn text_of(reports: &[ServerReport]) -> String {
+        let mut out = Vec::new();
+        render(reports, true, false, &mut out).unwrap();
+        String::from_utf8(out).unwrap()
+    }
+
+    fn json_of(reports: &[ServerReport]) -> Value {
+        let mut out = Vec::new();
+        render_json(reports, &mut out).unwrap();
+        serde_json::from_slice(&out).unwrap()
+    }
+
+    fn reports_with(store: &dyn CredentialStore) -> Vec<ServerReport> {
+        check_secrets(&Config::parse(OAUTH_CONFIG).unwrap(), store)
+    }
+
+    #[test]
+    fn oauth_logged_in_is_ok() {
+        let reports = reports_with(&FixedStore(Ok(Some("x"))));
+        let text = text_of(&reports);
+        assert!(text.contains("✓ oauth logged in"), "{text}");
+        assert!(all_ok(&reports));
+        assert_eq!(
+            json_of(&reports)["servers"][0]["oauth"]["status"],
+            "logged_in"
+        );
+    }
+
+    #[test]
+    fn oauth_not_logged_in_names_the_login_command() {
+        let reports = reports_with(&FixedStore(Ok(None)));
+        let text = text_of(&reports);
+        assert!(text.contains("✗ oauth not logged in"), "{text}");
+        assert!(text.contains("fix: toolward auth login s"), "{text}");
+        let json = json_of(&reports);
+        assert_eq!(json["servers"][0]["oauth"]["status"], "not_logged_in");
+        assert!(json["servers"][0]["oauth"].get("reason").is_none());
+    }
+
+    #[test]
+    fn store_failures_are_reported_for_oauth_and_secrets() {
+        let reports = reports_with(&FixedStore(Err("locked")));
+        let text = text_of(&reports);
+        assert!(!all_ok(&reports));
+        assert!(
+            text.contains("✗ oauth error: credential store failure: locked"),
+            "{text}"
+        );
+        assert!(
+            text.contains("✗ token error: credential store failure: locked"),
+            "{text}"
+        );
+        let json = json_of(&reports);
+        assert_eq!(json["servers"][0]["oauth"]["status"], "error");
+        assert_eq!(
+            json["servers"][1]["secrets"][0]["reason"],
+            "credential store failure: locked"
+        );
+    }
+
+    fn report_with_upstream(upstream: UpstreamReport) -> ServerReport {
+        ServerReport {
+            name: "s".into(),
+            secrets: Vec::new(),
+            oauth: None,
+            upstream: Some(upstream),
+        }
+    }
+
+    #[test]
+    fn a_connected_upstream_shows_what_it_announced() {
+        let report = report_with_upstream(UpstreamReport::Ok {
+            protocol: Some("2025-06-18".into()),
+            server: Some("srv 1.0".into()),
+            capabilities: vec!["prompts".into(), "tools".into()],
+            tools: vec![
+                ToolReport {
+                    name: "s__ping".into(),
+                    original: "ping".into(),
+                },
+                ToolReport {
+                    name: "s__short_x1".into(),
+                    original: "a_very_long_name".into(),
+                },
+            ],
+        });
+        let text = text_of(std::slice::from_ref(&report));
+        assert!(
+            text.contains("✓ protocol 2025-06-18 · srv 1.0 · prompts, tools"),
+            "{text}"
+        );
+        assert!(text.contains("✓ 2 tools"), "{text}");
+        assert!(text.contains("      s__ping\n"), "{text}");
+        assert!(
+            text.contains(r#"s__short_x1  (renamed from "a_very_long_name")"#),
+            "{text}"
+        );
+        let json = json_of(&[report]);
+        let upstream = &json["servers"][0]["upstream"];
+        assert_eq!(upstream["status"], "ok");
+        assert_eq!(
+            upstream["capabilities"],
+            serde_json::json!(["prompts", "tools"])
+        );
+        assert_eq!(upstream["tools"][1]["original"], "a_very_long_name");
+    }
+
+    #[test]
+    fn an_upstream_without_peer_info_has_no_announcement() {
+        let report = report_with_upstream(UpstreamReport::Ok {
+            protocol: None,
+            server: None,
+            capabilities: Vec::new(),
+            tools: vec![ToolReport {
+                name: "s__ping".into(),
+                original: "ping".into(),
+            }],
+        });
+        let text = text_of(&[report]);
+        assert!(!text.contains("protocol"), "{text}");
+        assert!(text.contains("✓ 1 tool\n"), "{text}");
+    }
+
+    #[test]
+    fn an_announcement_without_server_or_capabilities() {
+        let line = announcement("2025-06-18", &None, &[]);
+        assert_eq!(line, "protocol 2025-06-18 · (none)");
+    }
+
+    #[test]
+    fn a_failed_upstream_is_a_problem_in_both_formats() {
+        let report = report_with_upstream(UpstreamReport::Error {
+            reason: "boom".into(),
+        });
+        assert!(!report.is_ok());
+        let text = text_of(std::slice::from_ref(&report));
+        assert!(text.contains("✗ tools unavailable: boom"), "{text}");
+        let json = json_of(&[report]);
+        assert_eq!(
+            json["servers"][0]["upstream"],
+            serde_json::json!({"status": "error", "reason": "boom"})
+        );
+    }
+
+    #[test]
+    fn a_report_for_an_unknown_server_is_added_once() {
+        let mut reports = Vec::new();
+        report_for(&mut reports, "late").upstream =
+            Some(UpstreamReport::Error { reason: "x".into() });
+        report_for(&mut reports, "late");
+        assert_eq!(reports.len(), 1);
     }
 
     #[test]
