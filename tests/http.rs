@@ -642,19 +642,20 @@ async fn check_tools_lists_exposed_names_and_flags_failures() {
         http_upstream("down", "http://127.0.0.1:1/mcp", &[], &store),
         http_upstream("fast", &fast, &[], &store),
     ]);
+    let mut reports = Vec::new();
+    toolward::check::check_tools(&proxy, &mut reports).await;
     let mut out = Vec::new();
-    let all_listed = toolward::cli::check_tools(&proxy, &mut out).await.unwrap();
+    toolward::check::render(&reports, true, &mut out).unwrap();
     let text = String::from_utf8(out).unwrap();
-    assert!(!all_listed);
+    assert!(!toolward::check::all_ok(&reports));
     assert!(text.contains("fast__ping"), "{text}");
-    assert!(text.contains("server: fake-http 0"), "{text}");
-    assert!(
-        text.contains("capabilities: prompts, resources, tools"),
-        "{text}"
-    );
+    assert!(text.contains("fake-http 0"), "{text}");
+    assert!(text.contains("prompts, resources, tools"), "{text}");
+    assert!(text.contains("✓ 2 tools"), "{text}");
     assert!(
         text.contains(&format!("(renamed from {LONG_TOOL:?})")),
         "{text}"
     );
-    assert!(text.contains("ERROR"), "{text}");
+    assert!(text.contains("✗ tools unavailable"), "{text}");
+    assert!(text.contains("1 with problem"), "{text}");
 }

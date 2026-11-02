@@ -7,6 +7,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use rmcp::ServiceExt;
 
+use toolward::check;
 use toolward::cli::{self, AuthCommand, Cli, Command, SecretCommand};
 use toolward::config::Config;
 use toolward::import;
@@ -113,14 +114,14 @@ fn run_import(cli: &Cli, file: &Path, apply: bool, out: &mut dyn Write) -> Resul
 fn run_check(config_path: &Path, tools: bool, out: &mut dyn Write) -> Result<ExitCode> {
     let config = Config::load(config_path)?;
     let store = CachedStore::new(KeyringStore::native()?);
-    let mut ok = cli::check(&config, &store, out)?;
+    let mut reports = check::check_secrets(&config, &store);
     if tools {
         let store: Arc<dyn CredentialStore> = Arc::new(store);
         let proxy = Proxy::from_config(&config, &store);
-        writeln!(out)?;
-        ok &= new_runtime()?.block_on(cli::check_tools(&proxy, out))?;
+        new_runtime()?.block_on(check::check_tools(&proxy, &mut reports));
     }
-    Ok(if ok {
+    check::render(&reports, tools, out)?;
+    Ok(if check::all_ok(&reports) {
         ExitCode::SUCCESS
     } else {
         ExitCode::FAILURE
