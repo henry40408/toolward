@@ -12,8 +12,12 @@ exclude_re = [
   'replace login -> ',
   # Entry point that only wires up the real process.
   'replace main -> ExitCode',
-  # `<` vs `<=` on an Instant comparison is a timing tie that cannot be tested stably.
-  'Upstream::peer.*replace < with <=',
+  # The retry window is measured with a real Instant: `<` vs `<=` is a timing tie, and
+  # forcing the guard true needs a test that waits RETRY_AFTER.
+  'replace < with <= in Upstream::peer',
+  'replace match guard at\.elapsed\(\) < RETRY_AFTER with true',
   # Touching spans produce the same merged output either way.
-  'mask_text.*replace > with >=',
+  'replace > with >= in mask_text',
+  # The bytes OR-ed together never share bits, so `|` and `^` give the same result.
+  'replace \| with \^ in base64_encode',
 ]
