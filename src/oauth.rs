@@ -954,4 +954,48 @@ mod tests {
         let err = upstream.tools().await.unwrap_err();
         assert!(err.contains("toolward auth login sentry"), "{err}");
     }
+
+    #[test]
+    fn the_authorization_url_must_be_https_or_loopback_http() {
+        let accepted = [
+            "https://auth.example.com/authorize",
+            "http://localhost:8080/authorize",
+            "http://127.0.0.1/authorize",
+            "http://[::1]/authorize",
+        ];
+        for raw in accepted {
+            assert!(validated_auth_url(raw).is_ok(), "{raw}");
+        }
+        let rejected = [
+            "http://auth.example.com/authorize",
+            "ftp://localhost/authorize",
+            "file:///etc/passwd",
+            "not a url",
+        ];
+        for raw in rejected {
+            assert!(validated_auth_url(raw).is_err(), "{raw}");
+        }
+    }
+
+    #[tokio::test]
+    async fn offline_access_is_added_only_when_the_server_supports_it() {
+        let manager = AuthorizationManager::new("http://127.0.0.1:9/mcp")
+            .await
+            .unwrap();
+        let scopes = |names: &[&str]| names.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+        let configured = scopes(&["read"]);
+        let supported = scopes(&["read", "offline_access"]);
+        let unsupported = scopes(&["read"]);
+
+        let added = effective_scopes(&manager, &configured, Some(&supported));
+        assert_eq!(added, ["read", "offline_access"]);
+        let plain = effective_scopes(&manager, &configured, Some(&unsupported));
+        assert_eq!(plain, ["read"]);
+        let unknown = effective_scopes(&manager, &configured, None);
+        assert_eq!(unknown, ["read"]);
+        // Already asked for: not repeated.
+        let both = scopes(&["read", "offline_access"]);
+        let kept = effective_scopes(&manager, &both, Some(&supported));
+        assert_eq!(kept, ["read", "offline_access"]);
+    }
 }

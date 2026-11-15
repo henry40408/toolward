@@ -1104,4 +1104,107 @@ mod tests {
         let err = build_command(&spec, &MemoryStore::new()).err().unwrap();
         assert!(err.to_string().contains("nope"));
     }
+
+    // Fixed vectors: a test that encodes with `base64_encode` itself cannot
+    // notice a mistake in it, because the secret and the data go wrong alike.
+    #[test]
+    fn base64_encode_matches_rfc4648_without_padding() {
+        let cases = [
+            ("", ""),
+            ("f", "Zg"),
+            ("fo", "Zm8"),
+            ("foo", "Zm9v"),
+            ("foob", "Zm9vYg"),
+            ("fooba", "Zm9vYmE"),
+            ("foobar", "Zm9vYmFy"),
+        ];
+        for (plain, encoded) in cases {
+            assert_eq!(base64_encode(plain.as_bytes()), encoded, "{plain:?}");
+        }
+        assert_eq!(base64_encode(&[0xfb, 0xff, 0xfe]), "+//+");
+    }
+
+    #[test]
+    fn base64_forms_appear_in_data_at_every_alignment() {
+        // One byte is too short to own a whole base64 character at some
+        // alignments, so it may yield fewer forms, but never an empty one.
+        let short = base64_forms(b"a");
+        assert!(short.iter().all(|f| !f.is_empty()), "{short:?}");
+        for secret in ["ab", "abc", "tok/en+value=x"] {
+            let forms = base64_forms(secret.as_bytes());
+            assert!(forms.iter().all(|f| !f.is_empty()), "{secret}: {forms:?}");
+            for before in 0..3 {
+                for after in 0..3 {
+                    let data = format!("{}{secret}{}", "p".repeat(before), "s".repeat(after));
+                    let encoded = base64_encode(data.as_bytes());
+                    assert!(
+                        forms.iter().any(|f| encoded.contains(f.as_str())),
+                        "{secret} with {before} before and {after} after: {forms:?} in {encoded}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn protocol_values_must_have_the_shape_of_their_key() {
+        let long = "a".repeat(129);
+        let limit = "a".repeat(128);
+        let cases = [
+            ("type", "text", true),
+            ("type", "a_b-c9", true),
+            ("type", limit.as_str(), true),
+            ("type", long.as_str(), false),
+            ("type", "", false),
+            ("type", "a b", false),
+            ("type", "a.b", false),
+            ("role", "assistant", true),
+            ("audience", "user", true),
+            ("name", "ns.tool:v1/x", true),
+            ("name", "a b", false),
+            ("name", "", false),
+            ("mimeType", "text/plain", true),
+            ("mimeType", "application/ld+json", true),
+            ("mimeType", "textplain", false),
+            ("mimeType", "a/b/c", false),
+            ("mimeType", "a b/c", false),
+            ("other", "text", false),
+        ];
+        for (key, text, expected) in cases {
+            assert_eq!(is_protocol_value(key, text), expected, "{key}={text:?}");
+        }
+    }
+
+    #[test]
+    fn an_audience_list_is_exempt_only_when_every_entry_is() {
+        use serde_json::json;
+        assert!(exempt_value("audience", &json!(["user", "assistant"])));
+        assert!(!exempt_value("audience", &json!(["user", "a b"])));
+        assert!(!exempt_value("audience", &json!(["user", 1])));
+        assert!(!exempt_value("type", &json!(["user"])));
+        assert!(!exempt_value("type", &json!(1)));
+    }
+
+    #[test]
+    fn prompt_argument_lists_keep_their_names_but_argument_objects_are_masked() {
+        use serde_json::json;
+        let secrets = vec!["text".to_owned()];
+        let list = json!({"arguments": [{"name": "text"}]});
+        let out = redact_value(list, &secrets).unwrap();
+        assert_eq!(out["arguments"][0]["name"], "text");
+        // A tool call's arguments are free-form data, not protocol.
+        let call = json!({"arguments": {"name": "text"}});
+        let out = redact_value(call, &secrets).unwrap();
+        assert_eq!(out["arguments"]["name"], "[REDACTED]");
+    }
+
+    #[tokio::test]
+    async fn a_closed_upstream_refuses_new_connections() {
+        let upstream = Upstream::new("hang", Box::new(Hang), Arc::new(Hub::default()));
+        upstream.shutdown().await;
+        // Short timeout: without the refusal, `peer` would wait on `Hang`.
+        let result = tokio::time::timeout(Duration::from_secs(2), upstream.peer()).await;
+        let err = result.expect("peer must refuse at once").unwrap_err();
+        assert_eq!(err, "proxy is shutting down");
+    }
 }
