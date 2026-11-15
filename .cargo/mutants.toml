@@ -1,0 +1,23 @@
+# Every exclusion needs a reason; revisit when the behaviour changes.
+test_tool = "nextest"
+
+exclude_re = [
+  # Side effects with nothing observable to assert (logging, spawning a browser, piping stderr).
+  'replace log with \(\)',
+  'replace forward_stderr with \(\)',
+  'replace open_browser with \(\)',
+  # Debug output exists to hide secrets; a test would only pin formatting.
+  'impl std::fmt::Debug for ClientRecord',
+  # Interactive flow; covered by manual login, not unit tests.
+  'replace login -> ',
+  # Entry point that only wires up the real process.
+  'replace main -> ExitCode',
+  # The retry window is measured with a real Instant: `<` vs `<=` is a timing tie, and
+  # forcing the guard true needs a test that waits RETRY_AFTER.
+  'replace < with <= in Upstream::peer',
+  'replace match guard at\.elapsed\(\) < RETRY_AFTER with true',
+  # Touching spans produce the same merged output either way.
+  'replace > with >= in mask_text',
+  # The bytes OR-ed together never share bits, so `|` and `^` give the same result.
+  'replace \| with \^ in base64_encode',
+]

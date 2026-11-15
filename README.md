@@ -151,6 +151,7 @@ cargo clippy --all-targets --locked -- -D warnings
 cargo build --examples            # the integration tests start examples/fake_upstream
 cargo nextest run --locked        # tests; cargo test --doc runs the doctests
 cargo deny check                  # advisories and licenses
+cargo mutants --in-diff changes.diff      # optional: do the tests catch injected bugs? Save `git diff main` as changes.diff first; a full run takes about an hour
 ```
 
 The Rust version is pinned in `rust-toolchain.toml`. See [ARCHITECTURE.md](ARCHITECTURE.md) for how the code is organized.
