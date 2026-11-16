@@ -86,8 +86,8 @@ func connectorFor(name string, options FromConfigOptions) (upstream.Connector, e
 	if err != nil {
 		return nil, err
 	}
-	if transport.Stdio == nil {
-		return nil, fmt.Errorf("HTTP upstreams are not supported yet")
+	if transport.HTTP != nil {
+		return httpConnector(transport.HTTP, options)
 	}
 	return &upstream.StdioConnector{
 		Name: name,
@@ -98,6 +98,16 @@ func connectorFor(name string, options FromConfigOptions) (upstream.Connector, e
 		},
 		Store: options.Store,
 		Log:   options.Log,
+	}, nil
+}
+
+func httpConnector(transport *config.HTTPTransport, options FromConfigOptions) (upstream.Connector, error) {
+	if transport.OAuth != nil {
+		return nil, fmt.Errorf("OAuth upstreams are not supported yet")
+	}
+	return &upstream.HTTPConnector{
+		Spec:  upstream.HTTPSpec{URL: transport.URL, Headers: transport.Headers},
+		Store: options.Store,
 	}, nil
 }
 

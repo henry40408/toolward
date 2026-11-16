@@ -145,7 +145,11 @@ func (p *Peer) Call(ctx context.Context, method string, params json.RawMessage) 
 	if err != nil {
 		return nil, err
 	}
-	if err := p.send(encodeRequest(id, method, params)); err != nil {
+	request, err := encodeRequest(id, method, params)
+	if err == nil {
+		err = p.send(ctx, request)
+	}
+	if err != nil {
 		p.forget(string(id))
 		return nil, err
 	}
@@ -205,12 +209,23 @@ func (p *Peer) Notify(method string, params json.RawMessage) error {
 	if p.Closed() {
 		return p.Err()
 	}
-	return p.send(encodeNotification(method, params))
-}
-
-func (p *Peer) send(data []byte, err error) error {
+	notification, err := encodeNotification(method, params)
 	if err != nil {
 		return err
+	}
+	return p.send(context.Background(), notification)
+}
+
+// ContextWriter is implemented by transports whose Write can block on the
+// network, such as HTTP. A request that waits for its answer passes its
+// context, so giving up on the request also gives up on the write.
+type ContextWriter interface {
+	WriteContext(ctx context.Context, message []byte) error
+}
+
+func (p *Peer) send(ctx context.Context, data []byte) error {
+	if writer, ok := p.transport.(ContextWriter); ok {
+		return writer.WriteContext(ctx, data)
 	}
 	return p.transport.Write(data)
 }
@@ -324,7 +339,10 @@ func (p *Peer) serve(msg message) {
 		if errors.Is(context.Cause(ctx), errCancelledByPeer) {
 			return
 		}
-		_ = p.send(encodeAnswer(msg.ID, result, err))
+		answer, encodeErr := encodeAnswer(msg.ID, result, err)
+		if encodeErr == nil {
+			_ = p.send(context.Background(), answer)
+		}
 	}()
 }
 
