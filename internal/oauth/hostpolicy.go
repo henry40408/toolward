@@ -4,7 +4,6 @@ import (
 	"net"
 	"net/netip"
 	"net/url"
-	"os"
 	"strings"
 	"syscall"
 )
@@ -218,16 +217,4 @@ func (p addressPolicy) control(_, address string, _ syscall.RawConn) error {
 		return err
 	}
 	return &net.AddrError{Err: "address not allowed for OAuth requests from this resource", Addr: address}
-}
-
-// usesProxy tells whether the environment sends requests through a proxy. The
-// dialer then connects to the proxy, whose address is the operator's choice,
-// and the proxy resolves the target. Address checks cannot see the target.
-func usesProxy() bool {
-	for _, name := range []string{"HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"} {
-		if os.Getenv(name) != "" {
-			return true
-		}
-	}
-	return false
 }

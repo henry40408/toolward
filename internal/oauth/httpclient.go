@@ -5,10 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/url"
 	"time"
+
+	"golang.org/x/net/http/httpproxy"
 )
 
 const (
@@ -31,11 +32,7 @@ type HTTPClients struct {
 // NewHTTPClients returns clients that refuse addresses the resource must not
 // reach (see addressPolicy). base is the URL of the MCP server.
 func NewHTTPClients(base *url.URL) *HTTPClients {
-	transport := http.DefaultTransport.(*http.Transport).Clone()
-	if !usesProxy() {
-		dialer := &net.Dialer{Timeout: oauthHTTPTimeout, Control: newAddressPolicy(base).control}
-		transport.DialContext = dialer.DialContext
-	}
+	transport := newGuardedTransport(base, httpproxy.FromEnvironment())
 	return &HTTPClients{
 		Stop: &http.Client{
 			Transport:     transport,

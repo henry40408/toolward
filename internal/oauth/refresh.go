@@ -2,15 +2,12 @@ package oauth
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
-
-	"golang.org/x/oauth2"
 )
 
 // refreshBuffer is how long before expiry a token is refreshed, so that it
@@ -130,54 +127,14 @@ func (m *TokenManager) requestRefresh(ctx context.Context, refreshToken string, 
 	if len(scopes) > 0 {
 		form.Set("scope", strings.Join(scopes, " "))
 	}
-	request, err := m.refreshRequest(ctx, form)
-	if err != nil {
-		return nil, fmt.Errorf("OAuth token refresh failed: %w", err)
-	}
-	answer, err := send(m.Client, request)
-	if err != nil {
-		return nil, fmt.Errorf("OAuth token refresh failed: %w", err)
-	}
-	return parseRefresh(answer)
-}
-
-func (m *TokenManager) refreshRequest(ctx context.Context, form url.Values) (*http.Request, error) {
-	style := authStyle(m.Discovery.Metadata, m.Credentials)
-	secret := m.Credentials.ClientSecret
-	if secret == nil || style == oauth2.AuthStyleInParams {
-		form.Set("client_id", m.Credentials.ClientID)
-	}
-	if secret != nil && style == oauth2.AuthStyleInParams {
-		form.Set("client_secret", *secret)
-	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, m.Discovery.Metadata.TokenEndpoint, strings.NewReader(form.Encode()))
-	if err != nil {
-		return nil, err
-	}
-	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	request.Header.Set("Accept", "application/json")
-	if secret != nil && style == oauth2.AuthStyleInHeader {
-		request.SetBasicAuth(url.QueryEscape(m.Credentials.ClientID), url.QueryEscape(*secret))
-	}
-	return request, nil
-}
-
-// parseRefresh reads the answer of the token endpoint. invalid_grant means the
-// refresh token is no good, which is the end of the login.
-func parseRefresh(answer *response) (*TokenResponse, error) {
-	if answer.Status >= 200 && answer.Status <= 299 {
-		response, err := ParseTokenResponse(answer.Body)
-		if err != nil {
-			return nil, errors.New("OAuth token refresh failed: Server returned invalid response")
-		}
-		return &response, nil
-	}
-	var failure struct {
-		Error string `json:"error"`
-	}
-	_ = json.Unmarshal(answer.Body, &failure)
-	if failure.Error == "invalid_grant" {
+	response, err := requestTokens(ctx, m.Client, tokenRequest{
+		Metadata:    m.Discovery.Metadata,
+		Credentials: m.Credentials,
+		Form:        form,
+		Action:      "refresh",
+	})
+	if errors.Is(err, errInvalidGrant) {
 		return nil, fmt.Errorf("%w: OAuth refresh token was rejected", ErrAuthorizationRequired)
 	}
-	return nil, fmt.Errorf("OAuth token refresh failed: Server returned error response (HTTP %d): %s", answer.Status, answer.Body)
+	return response, err
 }

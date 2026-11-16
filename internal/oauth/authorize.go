@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"net/url"
 	"slices"
-	"strings"
 	"time"
 
 	"golang.org/x/oauth2"
@@ -84,6 +83,11 @@ func StartAuthorization(request AuthorizationRequest) (*Authorization, error) {
 	if err != nil {
 		return nil, err
 	}
+	// An authorization_endpoint that has its own state in the query would
+	// win over ours. Then the redirect could not be tied to this request.
+	if urlState, err := AuthURLState(authURL); err != nil || urlState != state {
+		return nil, errors.New("the server's authorization endpoint sets its own state")
+	}
 	return &Authorization{URL: authURL, State: state, verifier: verifier, config: config, request: request}, nil
 }
 
@@ -148,50 +152,36 @@ func (a *Authorization) Complete(ctx context.Context, client *http.Client, redir
 	if err := validateIssuer(metadata, parameters.issuer); err != nil {
 		return nil, err
 	}
-	exchangeContext := context.WithValue(ctx, oauth2.HTTPClient, client)
-	token, err := a.config.Exchange(exchangeContext, parameters.code,
-		oauth2.VerifierOption(a.verifier),
-		oauth2.SetAuthURLParam("resource", a.request.Discovery.Resource))
+	response, err := requestTokens(ctx, client, tokenRequest{
+		Metadata:    metadata,
+		Credentials: a.request.Credentials,
+		Form: url.Values{
+			"grant_type":    {"authorization_code"},
+			"code":          {parameters.code},
+			"redirect_uri":  {a.request.RedirectURI},
+			"code_verifier": {a.verifier},
+			"resource":      {a.request.Discovery.Resource},
+		},
+		Action: "exchange",
+	})
 	if err != nil {
-		return nil, fmt.Errorf("OAuth token exchange failed: %w", err)
+		return nil, err
 	}
-	return a.credentialsFor(token), nil
+	return a.credentialsFor(response), nil
 }
 
-func (a *Authorization) credentialsFor(token *oauth2.Token) *StoredCredentials {
-	response := responseFromToken(token)
+func (a *Authorization) credentialsFor(response *TokenResponse) *StoredCredentials {
 	granted := slices.Clone(a.request.Scopes)
 	if response.Scopes != nil {
 		granted = response.Scopes
 	}
 	return &StoredCredentials{
 		ClientID:        a.request.Credentials.ClientID,
-		TokenResponse:   &response,
+		TokenResponse:   response,
 		GrantedScopes:   nonNil(granted),
 		TokenReceivedAt: unixNow(time.Now()),
 		Issuer:          a.request.Discovery.Metadata.Issuer,
 	}
-}
-
-// responseFromToken keeps the fields toolward stores. The golang.org/x/oauth2
-// token has no room for the other fields of the response.
-func responseFromToken(token *oauth2.Token) TokenResponse {
-	response := TokenResponse{
-		AccessToken: token.AccessToken,
-		TokenType:   strings.ToLower(token.Type()),
-	}
-	if token.RefreshToken != "" {
-		refresh := token.RefreshToken
-		response.RefreshToken = &refresh
-	}
-	if token.ExpiresIn > 0 {
-		expires := uint64(token.ExpiresIn)
-		response.ExpiresIn = &expires
-	}
-	if scope, ok := token.Extra("scope").(string); ok {
-		response.Scopes = strings.Fields(scope)
-	}
-	return response
 }
 
 func nonNil(values []string) []string {

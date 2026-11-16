@@ -1,6 +1,8 @@
 package oauth
 
 import (
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -32,6 +34,12 @@ type fakeServer struct {
 	// tokenRequests holds the forms of the token endpoint.
 	tokenRequests []url.Values
 	tokenAuth     []string
+	// formTokens makes the token endpoint answer in form encoding.
+	formTokens bool
+	// authorizeSuffix is appended to the authorization endpoint.
+	authorizeSuffix string
+	// challenge is the code_challenge of the last authorization request.
+	challenge string
 	// bearers holds the Authorization headers the MCP endpoint saw.
 	bearers []string
 }
@@ -79,7 +87,7 @@ func (f *fakeServer) issuer() string {
 func (f *fakeServer) authorizationMetadata(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, 200, map[string]any{
 		"issuer":                           f.issuer(),
-		"authorization_endpoint":           f.server.URL + "/authorize",
+		"authorization_endpoint":           f.server.URL + "/authorize" + f.authorizeSuffix,
 		"token_endpoint":                   f.server.URL + "/token",
 		"registration_endpoint":            f.server.URL + "/register",
 		"response_types_supported":         []string{"code"},
@@ -104,6 +112,9 @@ func (f *fakeServer) authorize(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad authorization request", http.StatusBadRequest)
 		return
 	}
+	f.mu.Lock()
+	f.challenge = query.Get("code_challenge")
+	f.mu.Unlock()
 	back, _ := url.Parse(query.Get("redirect_uri"))
 	values := back.Query()
 	values.Set("code", "code-1")
@@ -119,8 +130,14 @@ func (f *fakeServer) token(w http.ResponseWriter, r *http.Request) {
 	f.tokenRequests = append(f.tokenRequests, r.PostForm)
 	f.tokenAuth = append(f.tokenAuth, r.Header.Get("Authorization"))
 	if r.PostForm.Get("grant_type") == "authorization_code" {
-		if r.PostForm.Get("code_verifier") == "" || r.PostForm.Get("code") != "code-1" {
+		digest := sha256.Sum256([]byte(r.PostForm.Get("code_verifier")))
+		if base64.RawURLEncoding.EncodeToString(digest[:]) != f.challenge || r.PostForm.Get("code") != "code-1" {
 			writeJSON(w, 400, map[string]any{"error": "invalid_grant"})
+			return
+		}
+		if f.formTokens {
+			w.Header().Set("Content-Type", "application/x-www-form-urlencoded")
+			_, _ = io.WriteString(w, "access_token="+f.accessToken+"&token_type=bearer&expires_in=3600&refresh_token="+f.refreshToken+"&scope=read&extra=1")
 			return
 		}
 		writeJSON(w, 200, map[string]any{"access_token": f.accessToken, "token_type": "Bearer", "expires_in": 3600, "refresh_token": f.refreshToken, "scope": "read"})
@@ -130,6 +147,10 @@ func (f *fakeServer) token(w http.ResponseWriter, r *http.Request) {
 }
 
 func (f *fakeServer) refreshAnswer(w http.ResponseWriter, form url.Values) {
+	if f.refreshGrant == "echo" {
+		http.Error(w, "cannot refresh "+form.Get("refresh_token"), http.StatusBadRequest)
+		return
+	}
 	if f.refreshGrant == "invalid_grant" || form.Get("refresh_token") != f.refreshToken {
 		writeJSON(w, 400, map[string]any{"error": "invalid_grant"})
 		return

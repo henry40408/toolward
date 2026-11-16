@@ -203,11 +203,6 @@ func (f *loginFlow) chooseClient(ctx context.Context, clients *HTTPClients, disc
 
 // waitForUser shows the URL and waits for the redirect of the browser.
 func (f *loginFlow) waitForUser(ctx context.Context, callback *Callback, authorization *Authorization) (string, error) {
-	state, err := AuthURLState(authorization.URL)
-	if err != nil {
-		return "", err
-	}
-	authorization.State = state
 	if f.request.Announce != nil {
 		f.request.Announce(authorization.URL.String())
 	}
@@ -220,7 +215,7 @@ func (f *loginFlow) waitForUser(ctx context.Context, callback *Callback, authori
 	}
 	waitContext, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	redirect, err := callback.Wait(waitContext, state)
+	redirect, err := callback.Wait(waitContext, authorization.State)
 	if errors.Is(waitContext.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
 		return "", fmt.Errorf("no authorization within %d seconds", int(timeout.Seconds()))
 	}

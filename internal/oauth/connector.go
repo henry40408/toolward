@@ -54,6 +54,8 @@ func (c *Connector) Connect(ctx context.Context, handler *upstream.Handler) (*mc
 	if err != nil {
 		return nil, err
 	}
+	// A refresh error may carry the body of the server, which may echo these.
+	secrets = append(secrets, stored.Values()...)
 	session, err := c.connectWith(ctx, connectRequest{
 		handler:     handler,
 		tokens:      tokens,
@@ -87,7 +89,7 @@ func (c *Connector) connectWith(ctx context.Context, request connectRequest) (*m
 		return nil, maskError(err, secrets)
 	}
 	if issuerChanged(request.stored, discovery) {
-		if err := forgetLogin(request.tokens, request.stored); err != nil {
+		if err := forgetLogin(request.tokens, request.stored, discovery.Metadata.Issuer); err != nil {
 			return nil, maskError(err, secrets)
 		}
 		return nil, c.loginHint()
@@ -160,11 +162,11 @@ func issuerChanged(stored *StoredCredentials, discovery *Discovery) bool {
 
 // forgetLogin drops the tokens of the old server. A client id that is an https
 // URL is a metadata document, valid at any server, so it is kept.
-func forgetLogin(tokens *TokenStore, stored *StoredCredentials) error {
+func forgetLogin(tokens *TokenStore, stored *StoredCredentials, currentIssuer *string) error {
 	if !isMetadataDocumentClientID(stored.ClientID) {
 		return tokens.Clear()
 	}
-	return tokens.Save(&StoredCredentials{ClientID: stored.ClientID, GrantedScopes: []string{}})
+	return tokens.Save(&StoredCredentials{ClientID: stored.ClientID, GrantedScopes: []string{}, Issuer: currentIssuer})
 }
 
 func isMetadataDocumentClientID(clientID string) bool {
