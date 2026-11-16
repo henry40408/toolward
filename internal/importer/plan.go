@@ -35,9 +35,15 @@ type Plan struct {
 	Notes []string
 }
 
-// String keeps the secrets out of `%v` and `%+v`.
-func (p *Plan) String() string {
+// String keeps the secrets out of `%v` and `%+v`. It has a value receiver so
+// that formatting a Plan value is covered too, not only a *Plan.
+func (p Plan) String() string {
 	return fmt.Sprintf("import plan (%d moves, %d skipped)", len(p.Moves), len(p.Skipped))
+}
+
+// GoString keeps the secrets out of `%#v`.
+func (p Plan) GoString() string {
+	return p.String()
 }
 
 // ConfigJSON returns the toolward config that results, on one line and

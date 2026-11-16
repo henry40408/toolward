@@ -31,7 +31,7 @@ func storeAndReplace(r replacement) error {
 	if err := os.MkdirAll(dir, 0o777); err != nil {
 		return fmt.Errorf("cannot create %s: %v", dir, unwrapPathError(err))
 	}
-	temp := strings.TrimSuffix(r.path, filepath.Ext(r.path)) + ".json.tmp"
+	temp := tempPath(r.path)
 	var created []string
 	err := writeAndSwap(r, temp, &created)
 	if err == nil {
@@ -94,4 +94,15 @@ func writePrivate(path, text string) error {
 		return err
 	}
 	return file.Close()
+}
+
+// tempPath swaps the extension for ".json.tmp". A dotfile such as `.toolward`
+// has no extension, so two dotfile configs in one directory keep distinct
+// temp files.
+func tempPath(path string) string {
+	base := filepath.Base(path)
+	if strings.HasPrefix(base, ".") && strings.Count(base, ".") == 1 {
+		return path + ".json.tmp"
+	}
+	return strings.TrimSuffix(path, filepath.Ext(path)) + ".json.tmp"
 }

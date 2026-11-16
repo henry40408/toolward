@@ -2,6 +2,7 @@ package importer
 
 import (
 	"bytes"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -168,5 +169,32 @@ func TestReportWithoutMovesSaysSo(t *testing.T) {
 	out := reportOf(t, mustPlan(t, `{"mcpServers": {"a": {"command": "x"}}}`), true)
 	if !strings.Contains(out, "no secret-looking env or header values found") || !strings.Contains(out, "Next:") {
 		t.Errorf("report = %s", out)
+	}
+}
+
+func TestPlanNeverFormatsSecrets(t *testing.T) {
+	plan := mustPlan(t, testSource)
+
+	for _, got := range []string{
+		fmt.Sprintf("%v", plan), fmt.Sprintf("%+v", plan), fmt.Sprintf("%#v", plan),
+		fmt.Sprintf("%v", *plan), fmt.Sprintf("%+v", *plan), fmt.Sprintf("%#v", *plan),
+	} {
+		if strings.Contains(got, "SECRET") {
+			t.Errorf("formatted plan leaks a secret: %s", got)
+		}
+	}
+}
+
+func TestTempPathKeepsDotfilesApart(t *testing.T) {
+	for path, want := range map[string]string{
+		"/h/.toolward":     "/h/.toolward.json.tmp",
+		"/h/config":        "/h/config.json.tmp",
+		"/h/config.json":   "/h/config.json.tmp",
+		"/h/a.b.json":      "/h/a.b.json.tmp",
+		"/h/.toolward.cfg": "/h/.toolward.json.tmp",
+	} {
+		if got := tempPath(path); got != want {
+			t.Errorf("tempPath(%s) = %s, want %s", path, got, want)
+		}
 	}
 }
