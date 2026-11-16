@@ -30,6 +30,10 @@ import (
 // EnvSwitch tells a test binary to act as the fake upstream.
 const EnvSwitch = "TOOLWARD_FAKE_UPSTREAM"
 
+// HangingNotice is the stderr line the fake writes once a hang call is
+// waiting. Tests use it to know that a cancellation reaches a running call.
+const HangingNotice = "fake-upstream: hang is waiting"
+
 // Run serves one connection on stdin and stdout until the client leaves.
 func Run() {
 	handler := newHandler(os.Getenv)
@@ -146,6 +150,7 @@ func envValue(name string) string {
 
 // hang leaves a marker file once the request is cancelled.
 func hang(ctx context.Context, marker string) (json.RawMessage, error) {
+	fmt.Fprintln(os.Stderr, HangingNotice)
 	<-ctx.Done()
 	if err := os.WriteFile(marker, []byte("cancelled"), 0o600); err != nil {
 		return nil, mcpwire.InternalError(err.Error())

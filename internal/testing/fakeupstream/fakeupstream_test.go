@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -23,11 +24,17 @@ func TestMain(m *testing.M) {
 
 func start(t *testing.T, env ...string) *mcpwire.Session {
 	t.Helper()
+	return startWithStderr(t, nil, env...)
+}
+
+func startWithStderr(t *testing.T, onStderrLine func(string), env ...string) *mcpwire.Session {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	t.Cleanup(cancel)
-	transport, err := mcpwire.StartCommand(ctx, mcpwire.CommandConfig{
-		Path:     os.Args[0],
-		ExtraEnv: append([]string{EnvSwitch + "=1"}, env...),
+	transport, err := mcpwire.StartCommand(mcpwire.CommandConfig{
+		Path:         os.Args[0],
+		ExtraEnv:     append([]string{EnvSwitch + "=1"}, env...),
+		OnStderrLine: onStderrLine,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -135,7 +142,13 @@ func TestListDelay(t *testing.T) {
 }
 
 func TestHangWritesTheMarkerWhenCancelled(t *testing.T) {
-	session := start(t)
+	hanging := make(chan struct{})
+	var once sync.Once
+	session := startWithStderr(t, func(line string) {
+		if line == HangingNotice {
+			once.Do(func() { close(hanging) })
+		}
+	})
 	marker := filepath.Join(t.TempDir(), "marker")
 	params, _ := json.Marshal(map[string]any{"name": "hang", "arguments": map[string]string{"marker": marker}})
 
@@ -145,7 +158,11 @@ func TestHangWritesTheMarkerWhenCancelled(t *testing.T) {
 		_, err := session.Call(ctx, "tools/call", params)
 		errs <- err
 	}()
-	time.Sleep(200 * time.Millisecond) // lets the call reach the fake
+	select {
+	case <-hanging:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the fake never started to hang")
+	}
 	cancel()
 	if err := <-errs; !errors.Is(err, context.Canceled) {
 		t.Fatalf("err = %v", err)

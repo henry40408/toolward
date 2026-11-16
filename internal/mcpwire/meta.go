@@ -38,10 +38,6 @@ const (
 	noInitializeFromVersion = Version20260728
 )
 
-// requiredMetaKeys are the keys 2026-07-28 requires in every inline request,
-// in the order rmcp reports them.
-var requiredMetaKeys = []string{MetaProtocolVersion, MetaClientCapabilities}
-
 // hasInitialize says whether a version negotiates by the initialize handshake.
 // Versions are dates, so they compare as text.
 func hasInitialize(version string) bool {
@@ -97,20 +93,31 @@ func isJSONObject(raw json.RawMessage) bool {
 	return bytes.HasPrefix(bytes.TrimSpace(raw), []byte("{")) && json.Valid(raw)
 }
 
-// withMeta returns params with the given entries added to its "_meta", which
-// they override. Other entries, such as a progress token, stay.
-func withMeta(params json.RawMessage, entries map[string]json.RawMessage) (json.RawMessage, error) {
-	fields := map[string]json.RawMessage{}
-	if len(params) > 0 {
-		if err := json.Unmarshal(params, &fields); err != nil {
+// decodeObject decodes a JSON object. Absent and null input give an empty
+// map that is safe to write to.
+func decodeObject(raw json.RawMessage) (map[string]json.RawMessage, error) {
+	var fields map[string]json.RawMessage
+	if len(raw) > 0 {
+		if err := json.Unmarshal(raw, &fields); err != nil {
 			return nil, err
 		}
 	}
-	meta := map[string]json.RawMessage{}
-	if existing := fields[metaField]; len(existing) > 0 {
-		if err := json.Unmarshal(existing, &meta); err != nil {
-			return nil, err
-		}
+	if fields == nil {
+		fields = map[string]json.RawMessage{}
+	}
+	return fields, nil
+}
+
+// withMeta returns params with the given entries added to its "_meta", which
+// they override. Other entries, such as a progress token, stay.
+func withMeta(params json.RawMessage, entries map[string]json.RawMessage) (json.RawMessage, error) {
+	fields, err := decodeObject(params)
+	if err != nil {
+		return nil, err
+	}
+	meta, err := decodeObject(fields[metaField])
+	if err != nil {
+		return nil, err
 	}
 	for key, value := range entries {
 		meta[key] = value

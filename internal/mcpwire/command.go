@@ -3,16 +3,16 @@ package mcpwire
 import (
 	"bufio"
 	"bytes"
-	"context"
 	"io"
 	"os"
 	"os/exec"
 	"sync"
+	"syscall"
 	"time"
 )
 
 const (
-	defaultExitGrace = 5 * time.Second
+	defaultExitGrace = 3 * time.Second
 	// A grandchild that keeps the pipes open must not keep Wait from returning.
 	pipeDrainDelay = 2 * time.Second
 )
@@ -26,8 +26,8 @@ type CommandConfig struct {
 	// OnStderrLine receives each line the child writes to stderr. Stderr is
 	// always drained and never inherited.
 	OnStderrLine func(line string)
-	// ExitGrace is how long Close waits for the child to leave on its own
-	// after its stdin is closed. Zero means five seconds.
+	// ExitGrace is how long Close waits at each step of the shutdown: after
+	// closing stdin, and again after SIGTERM. Zero means three seconds.
 	ExitGrace time.Duration
 }
 
@@ -41,9 +41,11 @@ type CommandTransport struct {
 	closeOnce sync.Once
 }
 
-// StartCommand starts the child. The child is killed when ctx ends.
-func StartCommand(ctx context.Context, config CommandConfig) (*CommandTransport, error) {
-	cmd := exec.CommandContext(ctx, config.Path, config.Args...)
+// StartCommand starts the child. It takes no context on purpose: a connect
+// timeout must not decide how long the child lives. The child lives until
+// Close or until it exits by itself.
+func StartCommand(config CommandConfig) (*CommandTransport, error) {
+	cmd := exec.Command(config.Path, config.Args...)
 	cmd.Env = append(os.Environ(), config.ExtraEnv...)
 	cmd.WaitDelay = pipeDrainDelay
 	stdin, err := cmd.StdinPipe()
@@ -87,7 +89,8 @@ func (t *CommandTransport) reap(stdout *io.PipeWriter, stderr *lineWriter) {
 	close(t.exited)
 }
 
-// Close closes the child's stdin and gives it time to leave before killing it.
+// Close shuts the child down like rmcp: close stdin, wait, SIGTERM, wait,
+// then kill. SIGTERM lets wrappers such as npx stop their own children.
 func (t *CommandTransport) Close() error {
 	t.closeOnce.Do(t.shutDown)
 	return nil
@@ -95,15 +98,25 @@ func (t *CommandTransport) Close() error {
 
 func (t *CommandTransport) shutDown() {
 	_ = t.stdin.Close()
+	if !t.exitsWithinGrace() {
+		_ = t.cmd.Process.Signal(syscall.SIGTERM)
+		if !t.exitsWithinGrace() {
+			_ = t.cmd.Process.Kill()
+			<-t.exited
+		}
+	}
+	_ = t.closer.Close()
+}
+
+func (t *CommandTransport) exitsWithinGrace() bool {
 	timer := time.NewTimer(t.grace)
 	defer timer.Stop()
 	select {
 	case <-t.exited:
+		return true
 	case <-timer.C:
-		_ = t.cmd.Process.Kill()
-		<-t.exited
+		return false
 	}
-	_ = t.closer.Close()
 }
 
 // lineWriter turns the stream written to it into lines.

@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/signal"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -18,6 +20,8 @@ func TestMain(m *testing.M) {
 		runEchoHelper()
 	case "stubborn":
 		runStubbornHelper()
+	case "sigterm":
+		runSigtermHelper()
 	default:
 		os.Exit(m.Run())
 	}
@@ -36,6 +40,16 @@ func runEchoHelper() {
 // runStubbornHelper ignores the end of its stdin.
 func runStubbornHelper() {
 	time.Sleep(time.Minute)
+	os.Exit(0)
+}
+
+// runSigtermHelper ignores the end of its stdin and reports SIGTERM.
+func runSigtermHelper() {
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, syscall.SIGTERM)
+	fmt.Fprintln(os.Stderr, "ready")
+	<-signals
+	fmt.Fprintln(os.Stderr, "got SIGTERM")
 	os.Exit(0)
 }
 
@@ -60,7 +74,7 @@ func startHelper(t *testing.T, mode string, config CommandConfig) *CommandTransp
 	t.Helper()
 	config.Path = os.Args[0]
 	config.ExtraEnv = append(config.ExtraEnv, helperEnv+"="+mode)
-	transport, err := StartCommand(context.Background(), config)
+	transport, err := StartCommand(config)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -104,26 +118,31 @@ func TestCommandCloseKillsAChildThatStays(t *testing.T) {
 	}
 }
 
-func TestCommandContextEndKillsChildAndEndsPeer(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	transport, err := StartCommand(ctx, CommandConfig{
-		Path:     os.Args[0],
-		ExtraEnv: []string{helperEnv + "=stubborn"},
+func TestCommandCloseSendsSIGTERMBeforeKilling(t *testing.T) {
+	var stderr lines
+	ready := make(chan struct{})
+	var once sync.Once
+	transport := startHelper(t, "sigterm", CommandConfig{
+		ExitGrace: 200 * time.Millisecond,
+		OnStderrLine: func(line string) {
+			stderr.add(line)
+			if line == "ready" {
+				once.Do(func() { close(ready) })
+			}
+		},
 	})
-	if err != nil {
+	<-ready
+	if err := transport.Close(); err != nil {
 		t.Fatal(err)
 	}
-	peer := NewPeer(transport, nil)
-	cancel()
-	select {
-	case <-peer.Done():
-	case <-time.After(10 * time.Second):
-		t.Fatal("peer did not end after the context did")
+	got := stderr.snapshot()
+	if len(got) != 2 || got[1] != "got SIGTERM" {
+		t.Errorf("stderr lines = %q", got)
 	}
 }
 
 func TestStartCommandReportsAMissingProgram(t *testing.T) {
-	if _, err := StartCommand(context.Background(), CommandConfig{Path: "/nonexistent/toolward-test"}); err == nil {
+	if _, err := StartCommand(CommandConfig{Path: "/nonexistent/toolward-test"}); err == nil {
 		t.Error("expected an error")
 	}
 }

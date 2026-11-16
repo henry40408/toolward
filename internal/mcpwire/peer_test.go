@@ -268,6 +268,24 @@ func TestClosingTheTransportFailsPendingCalls(t *testing.T) {
 	}
 }
 
+func TestHandlerPanicBecomesInternalErrorAndKeepsThePeerAlive(t *testing.T) {
+	server := funcHandler{request: func(_ context.Context, method string, _ json.RawMessage) (json.RawMessage, error) {
+		if method == "boom" {
+			panic("bad request")
+		}
+		return json.RawMessage(`{}`), nil
+	}}
+	client, _ := connect(t, nil, server)
+	_, err := client.Call(context.Background(), "boom", nil)
+	var rpcErr *Error
+	if !errors.As(err, &rpcErr) || rpcErr.Code != CodeInternalError {
+		t.Fatalf("err = %v", err)
+	}
+	if _, err := client.Call(context.Background(), "after", nil); err != nil {
+		t.Errorf("the peer stopped working: %v", err)
+	}
+}
+
 func TestCloseIsIdempotent(t *testing.T) {
 	client, _ := connect(t, nil, echoHandler())
 	_ = client.Close()

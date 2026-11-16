@@ -124,11 +124,12 @@ func inlineMeta(version string, client Implementation) (map[string]json.RawMessa
 // versions or capabilities says the server is older and needs Initialize.
 func Discover(ctx context.Context, peer *Peer, client Implementation) (*Session, error) {
 	preferred := []string{Version20260728}
+	attempt := discoverAttempt{peer: peer, client: client, preferred: preferred}
 	attempted := []string{}
 	candidate := preferred[0]
 	for {
 		attempted = append(attempted, candidate)
-		session, err := discoverOnce(ctx, peer, client, preferred, candidate)
+		session, err := attempt.run(ctx, candidate)
 		if err == nil {
 			return session, nil
 		}
@@ -140,8 +141,15 @@ func Discover(ctx context.Context, peer *Peer, client Implementation) (*Session,
 	}
 }
 
-func discoverOnce(ctx context.Context, peer *Peer, client Implementation, preferred []string, candidate string) (*Session, error) {
-	meta, err := inlineMeta(candidate, client)
+// discoverAttempt holds what stays the same between the tries of Discover.
+type discoverAttempt struct {
+	peer      *Peer
+	client    Implementation
+	preferred []string
+}
+
+func (a discoverAttempt) run(ctx context.Context, candidate string) (*Session, error) {
+	meta, err := inlineMeta(candidate, a.client)
 	if err != nil {
 		return nil, err
 	}
@@ -149,14 +157,14 @@ func discoverOnce(ctx context.Context, peer *Peer, client Implementation, prefer
 	if err != nil {
 		return nil, err
 	}
-	raw, err := peer.Call(ctx, methodDiscover, params)
+	raw, err := a.peer.Call(ctx, methodDiscover, params)
 	if err != nil {
 		return nil, wrapJSONRPCError(err)
 	}
-	return sessionFromDiscover(peer, client, preferred, raw)
+	return sessionFromDiscover(a, raw)
 }
 
-func sessionFromDiscover(peer *Peer, client Implementation, preferred []string, raw json.RawMessage) (*Session, error) {
+func sessionFromDiscover(a discoverAttempt, raw json.RawMessage) (*Session, error) {
 	var result struct {
 		SupportedVersions []string        `json:"supportedVersions"`
 		Capabilities      json.RawMessage `json:"capabilities"`
@@ -167,16 +175,16 @@ func sessionFromDiscover(peer *Peer, client Implementation, preferred []string, 
 	if err := json.Unmarshal(raw, &result); err != nil || result.SupportedVersions == nil {
 		return nil, fmt.Errorf("expect initialized result, but received: %s", raw)
 	}
-	selected, ok := firstShared(preferred, result.SupportedVersions)
+	selected, ok := firstShared(a.preferred, result.SupportedVersions)
 	if !ok {
-		return nil, fmt.Errorf("no compatible protocol version (client: %q, server: %q)", preferred, result.SupportedVersions)
+		return nil, fmt.Errorf("no compatible protocol version (client: %q, server: %q)", a.preferred, result.SupportedVersions)
 	}
-	meta, err := inlineMeta(selected, client)
+	meta, err := inlineMeta(selected, a.client)
 	if err != nil {
 		return nil, err
 	}
 	return &Session{
-		Peer: peer,
+		Peer: a.peer,
 		Info: InitInfo{
 			ProtocolVersion: selected,
 			ServerInfo:      result.Meta.ServerInfo,

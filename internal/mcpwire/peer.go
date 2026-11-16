@@ -317,7 +317,7 @@ func (p *Peer) serve(msg message) {
 	p.mu.Unlock()
 	go func() {
 		defer cancel(nil)
-		result, err := p.handler.HandleRequest(ctx, msg.Method, msg.Params)
+		result, err := p.runHandler(ctx, msg)
 		p.mu.Lock()
 		delete(p.inbound, key)
 		p.mu.Unlock()
@@ -326,6 +326,17 @@ func (p *Peer) serve(msg message) {
 		}
 		_ = p.send(encodeAnswer(msg.ID, result, err))
 	}()
+}
+
+// runHandler turns a panic in the handler into an internal error, so one bad
+// request does not stop the process.
+func (p *Peer) runHandler(ctx context.Context, msg message) (result json.RawMessage, err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			result, err = nil, InternalError(fmt.Sprintf("handler panicked: %v", recovered))
+		}
+	}()
+	return p.handler.HandleRequest(ctx, msg.Method, msg.Params)
 }
 
 func encodeAnswer(id json.RawMessage, result json.RawMessage, err error) ([]byte, error) {
