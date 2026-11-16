@@ -4,6 +4,7 @@ package store
 
 import (
 	"errors"
+	"fmt"
 
 	"github.com/keybase/go-keychain"
 )
@@ -35,7 +36,7 @@ func (*Keychain) Get(account string) (string, bool, error) {
 	query.SetReturnData(true)
 	results, err := keychain.QueryItem(query)
 	if err != nil {
-		return "", false, &BackendError{Message: err.Error()}
+		return "", false, backendError(account, err)
 	}
 	if len(results) == 0 {
 		return "", false, nil
@@ -56,7 +57,7 @@ func (*Keychain) Set(account, secret string) error {
 		err = keychain.UpdateItem(genericPassword(account), update)
 	}
 	if err != nil {
-		return &BackendError{Message: err.Error()}
+		return backendError(account, err)
 	}
 	return nil
 }
@@ -70,7 +71,24 @@ func (*Keychain) Delete(account string) (bool, error) {
 		return false, nil
 	}
 	if err != nil {
-		return false, &BackendError{Message: err.Error()}
+		return false, backendError(account, err)
 	}
 	return true, nil
+}
+
+// errSecInvalidOwnerEdit is the Security framework's -25244.
+const errSecInvalidOwnerEdit = keychain.Error(-25244)
+
+// backendError turns a Keychain failure into a BackendError. -25244 gets an
+// actionable text: the item belongs to another build of toolward, which owns
+// its access list.
+func backendError(account string, err error) *BackendError {
+	if !errors.Is(err, errSecInvalidOwnerEdit) {
+		return &BackendError{Message: err.Error()}
+	}
+	return &BackendError{Message: fmt.Sprintf(
+		"the Keychain item %q was created by another build of toolward, and this build may not change it. "+
+			"Allow access in Keychain Access, or remove the item with "+
+			"`security delete-generic-password -s %s -a %s` and run `toolward secret set %s` again (%v)",
+		account, Service, account, account, err)}
 }

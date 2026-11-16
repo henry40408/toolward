@@ -103,6 +103,15 @@ func TestHelpListsTheCommands(t *testing.T) {
 	}
 }
 
+func TestHelpCommandsExitZero(t *testing.T) {
+	for _, args := range [][]string{{"help"}, {"help", "check"}, {"help", "secret", "set"}, {"secret", "--help"}} {
+		stdout, stderr, code := runToCompletion(t, args...)
+		if code != 0 || stderr != "" || stdout == "" {
+			t.Errorf("%v: exit %d, stdout %q, stderr %q", args, code, stdout, stderr)
+		}
+	}
+}
+
 func TestVersionFlag(t *testing.T) {
 	stdout, stderr, code := runToCompletion(t, "--version")
 	if code != 0 || stderr != "" || !strings.HasPrefix(stdout, "toolward ") {

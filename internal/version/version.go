@@ -7,7 +7,7 @@ import "runtime/debug"
 //
 //	-ldflags "-X github.com/henry40408/toolward/internal/version.version=$GIT_VERSION"
 //
-// Docker builds have no .git directory, so they pass it in.
+// A build outside a checkout has no VCS information, so it passes the version in.
 var version string
 
 // Version returns the injected version, else the VCS-stamped module version,

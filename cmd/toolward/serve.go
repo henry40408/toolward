@@ -39,5 +39,14 @@ func runServe(p process, inv *invocation) error {
 	}
 	_ = peer.Close()
 	running.Shutdown()
-	return nil
+	return transportFailure(peer.Err())
+}
+
+// transportFailure is the reason the session ended, unless it ended the normal
+// way: stdin closed, or a termination signal.
+func transportFailure(reason error) error {
+	if reason == nil || reason == mcpwire.ErrClosed {
+		return nil
+	}
+	return reason
 }

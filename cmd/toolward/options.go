@@ -75,12 +75,32 @@ func parseInvocation(args []string) (*invocation, error) {
 	if err != nil || inv.showVersion {
 		return inv, err
 	}
+	if wantsGeneralHelp(&rest) {
+		inv.helpText = rootHelp()
+		return inv, flag.ErrHelp
+	}
 	command, rest, err := findCommand(rest)
 	if err != nil {
 		return inv, err
 	}
 	inv.command = command
 	return inv, parseCommand(inv, rest)
+}
+
+// wantsGeneralHelp is true for `help`, and for a command group (`secret`,
+// `auth`) asked for help. `help <command>` becomes `<command> --help`, as in
+// clap.
+func wantsGeneralHelp(args *[]string) bool {
+	words := *args
+	if words[0] == "help" {
+		if len(words) == 1 {
+			return true
+		}
+		words = append(append([]string{}, words[1:]...), "--help")
+		*args = words
+	}
+	isGroup := words[0] == "secret" || words[0] == "auth"
+	return isGroup && len(words) == 2 && (words[1] == "--help" || words[1] == "-h")
 }
 
 func newFlags(name string) *flag.FlagSet {

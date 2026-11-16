@@ -89,9 +89,31 @@ type literalGuard struct {
 }
 
 func (g literalGuard) RoundTrip(request *http.Request) (*http.Response, error) {
-	ip, err := netip.ParseAddr(request.URL.Hostname())
+	host := request.URL.Hostname()
+	ip, err := netip.ParseAddr(host)
 	if err == nil && !g.policy.allows(ip) {
 		return nil, &net.AddrError{Err: "address not allowed for OAuth requests from this resource", Addr: ip.String()}
 	}
+	if err != nil && looksNumeric(host) {
+		return nil, &net.AddrError{Err: "numeric host not allowed for OAuth requests from this resource", Addr: host}
+	}
 	return g.next.RoundTrip(request)
+}
+
+// looksNumeric reports a host whose last label is all digits or a hex number,
+// such as 2130706433, 0x7f000001 or 127.1. A proxy may read these as IPv4
+// addresses (inet_aton) that netip does not parse.
+func looksNumeric(host string) bool {
+	host = strings.TrimSuffix(host, ".")
+	label := host[strings.LastIndex(host, ".")+1:]
+	if label == "" {
+		return false
+	}
+	digits := label
+	isDigit := func(r rune) bool { return r >= '0' && r <= '9' }
+	if rest := strings.TrimPrefix(strings.ToLower(label), "0x"); rest != strings.ToLower(label) {
+		digits = rest
+		isDigit = func(r rune) bool { return r >= '0' && r <= '9' || r >= 'a' && r <= 'f' }
+	}
+	return digits == "" || strings.IndexFunc(digits, func(r rune) bool { return !isDigit(r) }) < 0
 }

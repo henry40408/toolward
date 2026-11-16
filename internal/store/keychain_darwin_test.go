@@ -5,8 +5,21 @@ package store
 import (
 	"errors"
 	"os"
+	"strings"
 	"testing"
 )
+
+func TestBackendErrorExplainsAnItemOfAnotherBuild(t *testing.T) {
+	err := backendError("github-token", errSecInvalidOwnerEdit)
+	for _, want := range []string{"another build", "security delete-generic-password -s toolward -a github-token", "toolward secret set github-token"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("message lacks %q: %v", want, err)
+		}
+	}
+	if other := backendError("a", errors.New("boom")); !strings.Contains(other.Error(), "boom") || strings.Contains(other.Error(), "another build") {
+		t.Errorf("got %v", other)
+	}
+}
 
 // The real Keychain may prompt, so this runs only on request.
 func TestKeychainRoundTrip(t *testing.T) {

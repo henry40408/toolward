@@ -121,7 +121,7 @@ func queryHoldsSecret(query string) bool {
 func argSecret(arg string) string {
 	flag, value, _ := strings.Cut(arg, "=")
 	// Why: the flag name is echoed, so a value glued to the flag (`--ghp_...`)
-	// would leak. Rust does the same; revisit both together.
+	// would leak.
 	if strings.HasPrefix(flag, "--") && looksSecret(flag) {
 		return fmt.Sprintf("argument %s looks like it holds a secret", flag)
 	}

@@ -132,6 +132,20 @@ func TestAnIPLiteralEndpointIsRefusedWithAProxy(t *testing.T) {
 	}
 }
 
+func TestANonCanonicalNumericHostIsRefusedWithAProxy(t *testing.T) {
+	proxy, hits := proxyRecorder(t)
+	clients := proxiedClients(t, proxy)
+	for _, host := range []string{"2130706433", "0x7f000001", "127.1", "127.0.0.1.", "0177.0.0.1"} {
+		err := getWith(clients.Stop, "http://"+host+"/")
+		if err == nil || !strings.Contains(err.Error(), "not allowed") {
+			t.Errorf("%s: got %v", host, err)
+		}
+	}
+	if hits.Load() != 0 {
+		t.Fatalf("the proxy was reached %d times", hits.Load())
+	}
+}
+
 func TestADirectTargetIsCheckedEvenWithAProxyConfigured(t *testing.T) {
 	proxy, hits := proxyRecorder(t)
 	clients := proxiedClients(t, proxy)

@@ -22,17 +22,19 @@ Claude Code ──stdio──> toolward serve ──stdio──> local MCP serve
 
 ## Install
 
-Needs macOS and the Go version in [go.mod](go.mod).
+Needs macOS, the Go version in [go.mod](go.mod), and cgo (the Xcode Command Line Tools: `xcode-select --install`), because the Keychain code calls the Security framework.
+
+Check out the repository, then install or build from it. `go install ...@latest` does not work until a Go release is tagged: the older tags are the Rust version.
 
 ```sh
-go install github.com/henry40408/toolward/cmd/toolward@latest
-```
-
-Or build from a checkout:
-
-```sh
+go install ./cmd/toolward
+# or
 go build -o bin/toolward ./cmd/toolward
 ```
+
+### Upgrading from the Rust version
+
+The Keychain items keep the same service and account names, so your secrets are found. The new binary is not on the access list of items the Rust build wrote, so macOS shows an allow dialog once per account. If `secret set` or `secret delete` fails with error -25244, the item belongs to the other build: run `security delete-generic-password -s toolward -a <name>` and then `toolward secret set <name>` again. An OAuth login that fails to refresh for this reason needs `toolward auth login <server>` again.
 
 A build from a checkout reports the version Go stamps from VCS. To set it, add `-ldflags "-X github.com/henry40408/toolward/internal/version.version=$GIT_VERSION"`.
 
@@ -152,6 +154,7 @@ The toolward config holds only references, but it also lists your accounts. Keep
 
 - Resource templates are not forwarded, and URIs inside resource links are not rewritten.
 - A server that fails to start is left out of `tools/list`; `toolward check --tools` shows why.
+- OAuth requests refuse private and loopback addresses, and numeric hosts such as `2130706433` or `127.1`. A host name that goes through an `HTTP_PROXY`/`HTTPS_PROXY` is resolved by the proxy, so only the proxy can refuse it. The proxy host itself is trusted.
 - Several `serve` processes can refresh the same OAuth token at once.
 
 ## Development
