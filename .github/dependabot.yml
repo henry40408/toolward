@@ -11,20 +11,14 @@ updates:
         patterns:
           - "*"
 
-  - package-ecosystem: "cargo"
+  # Dependabot also refreshes vendor/ for Go modules.
+  - package-ecosystem: "gomod"
     directory: "/"
     schedule:
       interval: "weekly"
     cooldown:
       default-days: 7
     groups:
-      cargo:
+      gomod:
         patterns:
           - "*"
-
-  - package-ecosystem: "rust-toolchain"
-    directory: "/"
-    schedule:
-      interval: "weekly"
-    cooldown:
-      default-days: 7

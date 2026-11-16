@@ -8,15 +8,29 @@ on:
 permissions:
   contents: read
 
-env:
-  CARGO_TERM_COLOR: always
-
 # One run per ref at a time: a newer push supersedes the run it interrupted.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
+  deps:
+    name: deps
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - run: go mod tidy -diff
+      - run: |
+          go mod vendor
+          test -z "$(git status --porcelain -- vendor go.mod go.sum)"
+      - run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
+
+  # macOS as well as Linux: the Keychain store only builds on darwin.
   lint:
     name: lint (${{ matrix.os }})
     strategy:
@@ -28,11 +42,15 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      # Reads the pinned version and components from rust-toolchain.toml.
-      - run: rustup toolchain install
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-      - run: cargo fmt --check
-      - run: cargo clippy --all-targets --locked -- -D warnings
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - run: |
+          unformatted="$(git ls-files -z '*.go' | grep -zvE '(^|/)vendor/' | xargs -0 gofmt -l 2>&1)"
+          echo "$unformatted"
+          test -z "$unformatted"
+      - run: go vet -mod=vendor ./...
+      - run: go run honnef.co/go/tools/cmd/staticcheck@v0.8.2 ./...
 
   test:
     name: test (${{ matrix.os }})
@@ -45,47 +63,56 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      # Reads the pinned version and components from rust-toolchain.toml.
-      - run: rustup toolchain install
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          tool: cargo-nextest
-      - run: cargo nextest run --locked
-      - run: cargo test --doc --locked
+          go-version-file: go.mod
+      - run: go test -mod=vendor -race ./...
 
+  # macOS, so the darwin-only Keychain code counts.
   coverage:
     name: coverage
-    runs-on: ubuntu-latest
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      # Reads the pinned version and components from rust-toolchain.toml.
-      - run: rustup toolchain install
-      # cargo-llvm-cov installs llvm-tools-preview itself.
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          tool: cargo-llvm-cov,nextest
-      - name: Collect coverage (llvm source-based, via nextest)
-        run: cargo llvm-cov nextest --locked --lcov --output-path lcov.info
-      - name: Upload to Codecov
-        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
+          go-version-file: go.mod
+      # `-coverprofile` ignores the binary that cmd/toolward's TestMain builds
+      # and runs; with TOOLWARD_COVERDIR set it builds that binary with `-cover`.
+      - run: |
+          TOOLWARD_COVERDIR="$PWD/covdata" go test -mod=vendor -coverprofile=coverage.out ./...
+          go tool covdata textfmt -i=covdata -o coverage-bin.out
+          tail -n +2 coverage-bin.out >> coverage.out
+      - uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
-          files: lcov.info
+          files: coverage.out
           # Coverage is a signal, not a gate.
           fail_ci_if_error: false
 
-  deny:
-    name: deny
+  # Advisory, like the Rust mutants job it replaces: a surviving mutant is a
+  # hint to read, not a failure.
+  mutation:
+    name: mutation
     runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      # Gremlins derives each mutant's timeout from how long its coverage run
+      # took. A cached test result makes that near zero, so nearly every mutant
+      # "times out" and the score means nothing.
+      - run: go clean -testcache
+      - run: |
+          go run github.com/go-gremlins/gremlins/cmd/gremlins@v0.6.0 unleash \
+            -E '^vendor/' --threshold-efficacy 95 .
 
   lint-workflow:
     name: lint-workflow
