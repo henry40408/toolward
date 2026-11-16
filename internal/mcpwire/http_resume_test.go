@@ -70,7 +70,8 @@ func TestHTTPAResumedStreamKeepsTheProtocolHeaders(t *testing.T) {
 			ids.set(msg.ID)
 			w.Header().Set("Content-Type", "text/event-stream")
 			_, _ = io.WriteString(w, "id: 1\nretry: 5\ndata:\n\n")
-		case len(ids.get()) == 0:
+		// Only the resume request may get the answer; the idle listener must not.
+		case len(ids.get()) == 0 || r.Header.Get("Last-Event-Id") == "":
 			w.WriteHeader(http.StatusMethodNotAllowed)
 		default:
 			w.Header().Set("Content-Type", "text/event-stream")
