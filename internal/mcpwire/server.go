@@ -3,9 +3,12 @@ package mcpwire
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
+
+	"github.com/henry40408/toolward/internal/rawjson"
 )
 
 // MethodHandler answers the methods that carry the server's actual content:
@@ -170,9 +173,42 @@ func (s *Server) dispatch(ctx context.Context, method string, params json.RawMes
 	case method == "completion/complete":
 		return json.RawMessage(`{"completion":{"values":[]}}`), nil
 	case contentMethods[method]:
-		return s.config.Methods.HandleRequest(ctx, method, params)
+		result, err := s.config.Methods.HandleRequest(ctx, method, params)
+		return adaptToPeer(result, err, inline)
 	}
 	return nil, MethodNotFound(method)
+}
+
+// adaptToPeer follows rmcp's last step before an answer leaves: a connection
+// older than 2026-07-28 does not know "resultType":"complete", and the error
+// code of a missing resource changed with that version.
+func adaptToPeer(result json.RawMessage, err error, inline bool) (json.RawMessage, error) {
+	if err != nil {
+		return nil, adaptError(err, inline)
+	}
+	if inline || !isComplete(result) {
+		return result, nil
+	}
+	stripped, stripErr := rawjson.Delete(result, "resultType")
+	if stripErr != nil {
+		return result, nil
+	}
+	return stripped, nil
+}
+
+func isComplete(result json.RawMessage) bool {
+	resultType, ok := rawjson.String(result, "resultType")
+	return ok && resultType == "complete"
+}
+
+func adaptError(err error, inline bool) error {
+	var rpcErr *Error
+	if !inline || !errors.As(err, &rpcErr) || rpcErr.Code != CodeResourceNotFound {
+		return err
+	}
+	adapted := *rpcErr
+	adapted.Code = CodeInvalidParams
+	return &adapted
 }
 
 func (s *Server) initialize(params json.RawMessage) (json.RawMessage, error) {

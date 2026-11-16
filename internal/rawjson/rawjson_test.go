@@ -50,3 +50,25 @@ func TestSetStringRejectsWhatIsNotAnObject(t *testing.T) {
 		}
 	}
 }
+
+func TestRawSetRawAndDelete(t *testing.T) {
+	object := json.RawMessage(`{"a":1,"b":{"c":2},"d":3}`)
+	if got := string(Raw(object, "b")); got != `{"c":2}` {
+		t.Errorf("Raw = %s", got)
+	}
+	if Raw(object, "missing") != nil {
+		t.Error("a missing key has no value")
+	}
+	set, err := SetRaw(object, "a", json.RawMessage(`[true]`))
+	if err != nil || string(set) != `{"a":[true],"b":{"c":2},"d":3}` {
+		t.Errorf("SetRaw = %s, %v", set, err)
+	}
+	deleted, err := Delete(object, "b")
+	if err != nil || string(deleted) != `{"a":1,"d":3}` {
+		t.Errorf("Delete = %s, %v", deleted, err)
+	}
+	same, err := Delete(object, "missing")
+	if err != nil || string(same) != string(object) {
+		t.Errorf("Delete of a missing key = %s, %v", same, err)
+	}
+}

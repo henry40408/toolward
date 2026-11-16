@@ -31,6 +31,15 @@ func String(object json.RawMessage, key string) (string, bool) {
 	return text, true
 }
 
+// Raw returns the value of key, or nil when the key is absent.
+func Raw(object json.RawMessage, key string) json.RawMessage {
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(object, &fields) != nil {
+		return nil
+	}
+	return fields[key]
+}
+
 // SetString returns object with key set to text. An existing key keeps its
 // place, a new one goes last.
 func SetString(object json.RawMessage, key, text string) (json.RawMessage, error) {
@@ -38,6 +47,11 @@ func SetString(object json.RawMessage, key, text string) (json.RawMessage, error
 	if err != nil {
 		return nil, err
 	}
+	return SetRaw(object, key, encoded)
+}
+
+// SetRaw is like SetString for a value that is already JSON.
+func SetRaw(object json.RawMessage, key string, value json.RawMessage) (json.RawMessage, error) {
 	members, err := members(object)
 	if err != nil {
 		return nil, err
@@ -45,14 +59,35 @@ func SetString(object json.RawMessage, key, text string) (json.RawMessage, error
 	replaced := false
 	for i := range members {
 		if members[i].key == key {
-			members[i].value = encoded
+			members[i].value = value
 			replaced = true
 		}
 	}
 	if !replaced {
-		members = append(members, member{key: key, value: encoded})
+		members = append(members, member{key: key, value: value})
 	}
 	return join(members)
+}
+
+// Delete returns object without key.
+func Delete(object json.RawMessage, key string) (json.RawMessage, error) {
+	all, err := members(object)
+	if err != nil {
+		return nil, err
+	}
+	kept := all[:0]
+	for _, m := range all {
+		if m.key != key {
+			kept = append(kept, m)
+		}
+	}
+	return join(kept)
+}
+
+// Marshal is json.Marshal without escaping "<", ">" and "&", so text stays
+// as it was.
+func Marshal(value any) (json.RawMessage, error) {
+	return encode(value)
 }
 
 // encode marshals without escaping "<", ">" and "&", so text stays as it was.
