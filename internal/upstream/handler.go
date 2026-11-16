@@ -62,6 +62,9 @@ func (h *Hub) forward(method string) {
 // Handler receives what one upstream sends on its own and keeps the secrets
 // used to connect to it. Connectors pass it to mcpwire.NewPeer.
 type Handler struct {
+	// The embedded handler answers roots/list and elicitation/create with
+	// "method not found". toolward declares neither capability, so only an
+	// upstream that breaks the rules sends them.
 	mcpwire.ClientHandler
 	hub         *Hub
 	forgetTools func()

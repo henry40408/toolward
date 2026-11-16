@@ -184,6 +184,32 @@ func TestAResultThatIsNotJSONFailsClosed(t *testing.T) {
 	}
 }
 
+func TestDuplicateKeysFailClosed(t *testing.T) {
+	cases := map[string]string{
+		"text":      `{"content":[{"type":"text","text":"secret-value","text":"x"}]}`,
+		"content":   `{"content":[{"type":"text","text":"secret-value"}],"content":[]}`,
+		"nested":    `{"structuredContent":{"a":{"k":1,"k":2}}}`,
+		"in array":  `{"content":[{"a":1},{"b":{"c":1,"c":1}}]}`,
+		"top level": `{"a":"x","a":"secret-value"}`,
+	}
+	for name, raw := range cases {
+		t.Run(name, func(t *testing.T) {
+			_, err := Value(json.RawMessage(raw), []string{"secret-value"})
+			if err != ErrCannotInspect {
+				t.Fatalf("got %v", err)
+			}
+		})
+	}
+}
+
+func TestSameKeyInSeparateObjectsIsNotADuplicate(t *testing.T) {
+	raw := json.RawMessage(`{"content":[{"type":"text","text":"a"},{"type":"text","text":"b"}]}`)
+	out, err := Value(raw, []string{"secret-value"})
+	if err != nil || string(out) != string(raw) {
+		t.Fatalf("got %s, %v", out, err)
+	}
+}
+
 func TestNoUsableSecretsReturnsTheValueUntouched(t *testing.T) {
 	value := json.RawMessage(`not even json`)
 	out, err := Value(value, []string{"abc", ""})

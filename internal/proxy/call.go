@@ -47,27 +47,51 @@ func upstreamError(u *upstream.Upstream, err error) error {
 	return &result
 }
 
-// forward sends params upstream and returns the masked result.
-func forward(ctx context.Context, u *upstream.Upstream, session *mcpwire.Session, method string, params json.RawMessage) (json.RawMessage, error) {
-	result, err := session.Call(ctx, method, params)
+// forwardRequest is one request to an upstream, over a session already
+// obtained from it.
+type forwardRequest struct {
+	Upstream *upstream.Upstream
+	Session  *mcpwire.Session
+	Method   string
+	Params   json.RawMessage
+}
+
+// forward sends the request upstream and returns the masked result.
+func forward(ctx context.Context, req forwardRequest) (json.RawMessage, error) {
+	result, err := req.Session.Call(ctx, req.Method, req.Params)
 	if err != nil {
-		return nil, upstreamError(u, err)
+		return nil, upstreamError(req.Upstream, err)
 	}
-	masked, err := u.RedactResult(result)
+	masked, err := req.Upstream.RedactResult(result)
 	if err != nil {
 		return nil, mcpwire.InternalError(err.Error())
 	}
 	return masked, nil
 }
 
+// present is false for an absent key and for JSON null, which the Rust
+// version (typed Option fields) also treated as absent.
+func present(value json.RawMessage) bool {
+	return value != nil && string(value) != "null"
+}
+
 // withResultType returns result with "resultType":"complete" when it has
 // none. Upstreams on older protocol revisions omit it, which the 2026-07-28
 // revision spoken to the agent requires.
 func withResultType(result json.RawMessage) (json.RawMessage, error) {
-	if rawjson.Raw(result, "resultType") != nil {
+	if present(rawjson.Raw(result, "resultType")) {
 		return result, nil
 	}
 	return rawjson.SetString(result, "resultType", "complete")
+}
+
+// withContent returns result with "content":[] when it has none: the schema
+// requires the field, and the Rust version's typed result always wrote it.
+func withContent(result json.RawMessage) (json.RawMessage, error) {
+	if present(rawjson.Raw(result, "content")) {
+		return result, nil
+	}
+	return rawjson.SetRaw(result, "content", json.RawMessage("[]"))
 }
 
 type callParams struct {
@@ -79,43 +103,53 @@ func (p *Proxy) callTool(ctx context.Context, params json.RawMessage) (json.RawM
 	if err := json.Unmarshal(params, &request); err != nil {
 		return nil, mcpwire.InvalidParams(fmt.Sprintf("invalid params: %v", err))
 	}
-	unknown := mcpwire.InvalidParams(fmt.Sprintf("unknown tool %q", request.Name))
-	server, called, ok := splitName(request.Name)
-	if !ok || p.upstreams[server] == nil {
-		return nil, unknown
-	}
-	u := p.upstreams[server]
-	original, found, err := u.OriginalTool(ctx, called)
+	u, original, err := p.resolveTool(ctx, request.Name)
 	if err != nil {
-		return nil, unavailable(server, err)
-	}
-	if !found {
-		return nil, unknown
+		return nil, err
 	}
 	session, err := u.Peer(ctx)
 	if err != nil {
-		return nil, unavailable(server, err)
+		return nil, unavailable(u.Name(), err)
 	}
 	renamed, err := rawjson.SetString(params, "name", original)
 	if err != nil {
 		return nil, mcpwire.InternalError(err.Error())
 	}
-	result, err := callCancellable(ctx, u, session, renamed)
+	result, err := callCancellable(ctx, forwardRequest{Upstream: u, Session: session, Method: "tools/call", Params: renamed})
 	if err != nil {
 		return nil, err
 	}
 	return toolResult(result)
 }
 
+// resolveTool finds the upstream of an exposed tool name and the name that
+// upstream knows the tool by.
+func (p *Proxy) resolveTool(ctx context.Context, exposed string) (*upstream.Upstream, string, error) {
+	unknown := mcpwire.InvalidParams(fmt.Sprintf("unknown tool %q", exposed))
+	server, called, ok := splitName(exposed)
+	if !ok || p.upstreams[server] == nil {
+		return nil, "", unknown
+	}
+	u := p.upstreams[server]
+	original, found, err := u.OriginalTool(ctx, called)
+	if err != nil {
+		return nil, "", unavailable(server, err)
+	}
+	if !found {
+		return nil, "", unknown
+	}
+	return u, original, nil
+}
+
 // callCancellable forwards a tool call. When the agent cancels its request,
 // the upstream gets `notifications/cancelled` too, so a long-running tool
 // stops as well.
-func callCancellable(ctx context.Context, u *upstream.Upstream, session *mcpwire.Session, params json.RawMessage) (json.RawMessage, error) {
+func callCancellable(ctx context.Context, req forwardRequest) (json.RawMessage, error) {
 	callCtx, cancel := context.WithCancelCause(context.WithoutCancel(ctx))
 	defer cancel(nil)
 	stop := context.AfterFunc(ctx, func() { cancel(errors.New(cancelReason)) })
 	defer stop()
-	return forward(callCtx, u, session, "tools/call", params)
+	return forward(callCtx, req)
 }
 
 // toolResult accepts the result shapes of tools/call and completes the
@@ -124,19 +158,29 @@ func callCancellable(ctx context.Context, u *upstream.Upstream, session *mcpwire
 func toolResult(result json.RawMessage) (json.RawMessage, error) {
 	resultType, _ := rawjson.String(result, "resultType")
 	switch resultType {
+	// A task handle is passed on as it is. toolward does not serve
+	// tasks/get either way, and an upstream only returns one to a client that
+	// declared the tasks capability, which toolward does not.
 	case "input_required", "task":
 		return result, nil
 	case "", "complete":
 		if !hasToolOutcome(result) {
 			return nil, mcpwire.InternalError("unsupported upstream result")
 		}
-		completed, err := withResultType(result)
-		if err != nil {
-			return nil, mcpwire.InternalError(err.Error())
-		}
-		return completed, nil
+		return completeToolResult(result)
 	}
 	return nil, mcpwire.InternalError("unsupported upstream result")
+}
+
+func completeToolResult(result json.RawMessage) (json.RawMessage, error) {
+	completed, err := withContent(result)
+	if err == nil {
+		completed, err = withResultType(completed)
+	}
+	if err != nil {
+		return nil, mcpwire.InternalError(err.Error())
+	}
+	return completed, nil
 }
 
 func hasToolOutcome(result json.RawMessage) bool {

@@ -89,32 +89,18 @@ func (p *Proxy) merge(ctx context.Context, spec listing) (json.RawMessage, error
 	return p.combine(spec, results)
 }
 
+type listEntry struct {
+	key  string
+	item json.RawMessage
+}
+
 func (p *Proxy) combine(spec listing, results []fetched) (json.RawMessage, error) {
-	type entry struct {
-		key  string
-		item json.RawMessage
-	}
-	var entries []entry
+	var entries []listEntry
 	var hints []cache.Hint
 	for i, result := range results {
-		name := p.names[i]
-		switch {
-		case result.err != nil:
-			hints = append(hints, cache.Uncacheable)
-			upstream.Log(p.log, fmt.Sprintf("skipping upstream %q: %v", name, result.err))
-		case result.skipped:
-		default:
-			hints = append(hints, result.hint)
-			for _, item := range result.items {
-				exposed, key, err := expose(spec, name, item)
-				if err != nil {
-					hints = append(hints, cache.Uncacheable)
-					upstream.Log(p.log, fmt.Sprintf("skipping an item of upstream %q: %v", name, err))
-					continue
-				}
-				entries = append(entries, entry{key: key, item: exposed})
-			}
-		}
+		more, resultHints := p.entriesOf(spec, p.names[i], result)
+		entries = append(entries, more...)
+		hints = append(hints, resultHints...)
 	}
 	sort.SliceStable(entries, func(a, b int) bool { return entries[a].key < entries[b].key })
 	items := make([]json.RawMessage, 0, len(entries))
@@ -122,6 +108,30 @@ func (p *Proxy) combine(spec listing, results []fetched) (json.RawMessage, error
 		items = append(items, e.item)
 	}
 	return listResult(spec.kind.Field, items, cache.WeakestOf(hints))
+}
+
+// entriesOf turns one upstream's answer into list entries and the hints that
+// count towards the merged list. A skipped upstream adds neither.
+func (p *Proxy) entriesOf(spec listing, name string, result fetched) ([]listEntry, []cache.Hint) {
+	if result.err != nil {
+		upstream.Log(p.log, fmt.Sprintf("skipping upstream %q: %v", name, result.err))
+		return nil, []cache.Hint{cache.Uncacheable}
+	}
+	if result.skipped {
+		return nil, nil
+	}
+	var entries []listEntry
+	hints := []cache.Hint{result.hint}
+	for _, item := range result.items {
+		exposed, key, err := expose(spec, name, item)
+		if err != nil {
+			hints = append(hints, cache.Uncacheable)
+			upstream.Log(p.log, fmt.Sprintf("skipping an item of upstream %q: %v", name, err))
+			continue
+		}
+		entries = append(entries, listEntry{key: key, item: exposed})
+	}
+	return entries, hints
 }
 
 // expose rewrites the identifier of an item and returns it with its sort key.

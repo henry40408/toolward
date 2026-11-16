@@ -119,7 +119,7 @@ func (p *Proxy) readResource(ctx context.Context, params json.RawMessage) (json.
 	if err != nil {
 		return nil, mcpwire.InternalError(err.Error())
 	}
-	result, err := forward(ctx, u, session, "resources/read", renamed)
+	result, err := forward(ctx, forwardRequest{Upstream: u, Session: session, Method: "resources/read", Params: renamed})
 	if err != nil {
 		return nil, err
 	}

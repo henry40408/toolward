@@ -44,6 +44,9 @@ func Value(raw json.RawMessage, secrets []string) (json.RawMessage, error) {
 	if len(patterns) == 0 {
 		return raw, nil
 	}
+	if checkNoDuplicateKeys(raw) != nil {
+		return nil, ErrCannotInspect
+	}
 	value, err := decodeUsingNumbers(raw)
 	if err != nil {
 		return nil, ErrCannotInspect

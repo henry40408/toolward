@@ -28,7 +28,7 @@ func (p *Proxy) getPrompt(ctx context.Context, params json.RawMessage) (json.Raw
 	if err != nil {
 		return nil, mcpwire.InternalError(err.Error())
 	}
-	result, err := forward(ctx, u, session, "prompts/get", renamed)
+	result, err := forward(ctx, forwardRequest{Upstream: u, Session: session, Method: "prompts/get", Params: renamed})
 	if err != nil {
 		return nil, err
 	}

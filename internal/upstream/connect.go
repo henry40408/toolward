@@ -102,7 +102,9 @@ func (c *StdioConnector) Connect(ctx context.Context, handler *Handler) (*mcpwir
 	peer := mcpwire.NewPeer(transport, handler)
 	session, err := mcpwire.Initialize(ctx, peer, ClientInfo())
 	if err != nil {
-		_ = peer.Close()
+		// Close can wait seconds for a child that ignores stdin EOF, and the
+		// caller may be a list request that already ran out of time.
+		go func() { _ = peer.Close() }()
 		return nil, handshakeError(err, built.Secrets)
 	}
 	return session, nil

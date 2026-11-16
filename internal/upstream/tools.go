@@ -58,8 +58,9 @@ func (u *Upstream) toolsFrom(ctx context.Context, session *mcpwire.Session) (cac
 func toolNames(tools []json.RawMessage) []string {
 	originals := make([]string, 0, len(tools))
 	for _, tool := range tools {
-		name, _ := rawjson.String(tool, "name")
-		originals = append(originals, name)
+		if name, ok := rawjson.String(tool, "name"); ok {
+			originals = append(originals, name)
+		}
 	}
 	return originals
 }
@@ -75,9 +76,10 @@ func (u *Upstream) rename(tools []json.RawMessage, assignment names.Assignment) 
 	var kept []json.RawMessage
 	var renamed []ToolName
 	for _, tool := range tools {
-		original, _ := rawjson.String(tool, "name")
+		original, named := rawjson.String(tool, "name")
 		exposed, known := exposedOf[original]
-		if !known || mapped.originals[original] {
+		// A tool without a name cannot be called, so it is left out.
+		if !named || !known || mapped.originals[original] {
 			continue
 		}
 		if exposed != original {
