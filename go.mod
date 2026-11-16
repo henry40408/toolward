@@ -5,3 +5,5 @@ go 1.26.0
 toolchain go1.26.11
 
 require github.com/keybase/go-keychain v0.0.1
+
+require github.com/tailscale/hujson v0.0.0-20260727124030-b80ff77dac4f
