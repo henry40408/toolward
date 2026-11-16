@@ -56,9 +56,9 @@ func InternalError(message string) *Error {
 	return NewError(CodeInternalError, message)
 }
 
-// Error renders the error like rmcp does, so messages read the same as before.
+// Error renders the error like rmcp's ErrorData does, so messages read the same as before.
 func (e *Error) Error() string {
-	text := fmt.Sprintf("Mcp error: %d: %s", e.Code, e.Message)
+	text := fmt.Sprintf("%d: %s", e.Code, e.Message)
 	if len(e.Data) > 0 {
 		text += "(" + string(e.Data) + ")"
 	}

@@ -95,7 +95,7 @@ func TestHandlerErrorKeepsCodeAndData(t *testing.T) {
 	if rpcErr.Code != CodeInvalidParams || rpcErr.Message != "bad" || string(rpcErr.Data) != `{"x":1}` {
 		t.Errorf("error = %+v", rpcErr)
 	}
-	if want := `Mcp error: -32602: bad({"x":1})`; rpcErr.Error() != want {
+	if want := `-32602: bad({"x":1})`; rpcErr.Error() != want {
 		t.Errorf("text = %q, want %q", rpcErr.Error(), want)
 	}
 }
