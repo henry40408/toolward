@@ -64,6 +64,13 @@ type HTTPTransport struct {
 	sessionID    string
 	version      string
 	initializeID string
+	// initializeBody and initializedBody are the handshake messages, kept to
+	// open a new session when the server forgets the old one.
+	initializeBody  []byte
+	initializedBody []byte
+
+	// reinit lets one call at a time open the new session.
+	reinit sync.Mutex
 }
 
 // NewHTTPTransport returns a transport that has not sent anything yet.
@@ -129,17 +136,20 @@ func (t *HTTPTransport) postInBackground(raw []byte, msg message) error {
 	return nil
 }
 
-func (t *HTTPTransport) runInBackground(work func()) {
+// runInBackground reports whether the work was started. It is not once the
+// transport is closed.
+func (t *HTTPTransport) runInBackground(work func()) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.closed {
-		return
+		return false
 	}
 	t.background.Add(1)
 	go func() {
 		defer t.background.Done()
 		work()
 	}()
+	return true
 }
 
 // requestContext ends when ctx ends or the transport is closed.
@@ -153,6 +163,22 @@ func (t *HTTPTransport) requestContext(ctx context.Context) (context.Context, fu
 }
 
 func (t *HTTPTransport) post(ctx context.Context, raw []byte, msg message) error {
+	t.rememberHandshake(raw, msg)
+	err := t.postOnce(ctx, raw, msg)
+	var lost *sessionLostError
+	if errors.As(err, &lost) {
+		err = t.retryAfterReinitialize(ctx, raw, msg, lost.id)
+	}
+	if err != nil {
+		return err
+	}
+	if msg.Method == methodInitialized {
+		t.listenForServerMessages()
+	}
+	return nil
+}
+
+func (t *HTTPTransport) postOnce(ctx context.Context, raw []byte, msg message) error {
 	ctx, release := t.requestContext(ctx)
 	request, err := t.newRequest(ctx, http.MethodPost, bytes.NewReader(raw))
 	if err != nil {
@@ -166,13 +192,7 @@ func (t *HTTPTransport) post(ctx context.Context, raw []byte, msg message) error
 		release()
 		return err
 	}
-	if err := t.handleResponse(response, msg, release); err != nil {
-		return err
-	}
-	if msg.Method == methodInitialized {
-		t.listenForServerMessages()
-	}
-	return nil
+	return t.handleResponse(response, msg, release)
 }
 
 func (t *HTTPTransport) newRequest(ctx context.Context, method string, body io.Reader) (*http.Request, error) {
@@ -261,7 +281,10 @@ func (t *HTTPTransport) handleResponse(response *http.Response, sent message, re
 		return t.deliverJSON(response.Body, sent)
 	case "text/event-stream":
 		streaming = true
-		t.runInBackground(func() { t.pumpResponseStream(response, sent, release) })
+		started := t.runInBackground(func() { t.pumpResponseStream(response, sent, release) })
+		if !started {
+			streaming = false
+		}
 		return nil
 	}
 	return fmt.Errorf("unexpected content type: %q", response.Header.Get("Content-Type"))
@@ -285,7 +308,7 @@ var errErrorDelivered = errors.New("the JSON-RPC error was delivered")
 // body of the answer to a request is not a failure: it goes to Read.
 func (t *HTTPTransport) checkStatus(response *http.Response, sent message) error {
 	status := response.StatusCode
-	if status == http.StatusUnauthorized {
+	if status == http.StatusUnauthorized || status == http.StatusForbidden {
 		if challenge := response.Header.Get("WWW-Authenticate"); challenge != "" {
 			return &AuthorizationRequiredError{Challenge: challenge}
 		}
@@ -294,8 +317,8 @@ func (t *HTTPTransport) checkStatus(response *http.Response, sent message) error
 		t.rememberSession(response.Header)
 		return nil
 	}
-	if status == http.StatusNotFound && response.Request.Header.Get(headerSessionID) != "" {
-		return t.expireSession()
+	if id := response.Request.Header.Get(headerSessionID); status == http.StatusNotFound && id != "" {
+		return &sessionLostError{id: id}
 	}
 	return t.failedStatus(response, sent)
 }
@@ -440,24 +463,6 @@ func (t *HTTPTransport) learnVersion(msg message) {
 	}
 }
 
-// pumpResponseStream reads the events of a POST answer. A stream that ends
-// before the answer would leave the caller waiting, so it is answered with an
-// error.
-func (t *HTTPTransport) pumpResponseStream(response *http.Response, sent message, release func()) {
-	defer release()
-	defer response.Body.Close()
-	answered := false
-	err := readEvents(response.Body, func(event sseEvent) error {
-		msg := t.receiveEvent(event)
-		answered = answered || (msg.kind() == kindResponse && idKey(msg.ID) == idKey(sent.ID))
-		return nil
-	})
-	if sent.kind() != kindRequest || answered {
-		return
-	}
-	t.queue.push(streamEndedError(sent.ID, err))
-}
-
 func streamEndedError(id json.RawMessage, cause error) []byte {
 	text := "the response stream ended before the answer"
 	if cause != nil {
@@ -485,84 +490,6 @@ func (t *HTTPTransport) listenForServerMessages() {
 		return
 	}
 	t.runInBackground(t.listen)
-}
-
-type streamOutcome int
-
-const (
-	streamEnded streamOutcome = iota
-	streamFailed
-	streamUnsupported
-)
-
-// listenState is what carries over from one connection of the stream to the
-// next.
-type listenState struct {
-	lastEventID string
-	retry       time.Duration
-}
-
-func (t *HTTPTransport) listen() {
-	state := &listenState{retry: defaultStreamRetry}
-	for failures := 0; failures < maxStreamFailures; {
-		switch t.openServerStream(state) {
-		case streamUnsupported:
-			return
-		case streamFailed:
-			failures++
-		case streamEnded:
-			failures = 0
-		}
-		if !t.sleep(state.retry) {
-			return
-		}
-	}
-}
-
-func (t *HTTPTransport) sleep(delay time.Duration) bool {
-	timer := time.NewTimer(delay)
-	defer timer.Stop()
-	select {
-	case <-timer.C:
-		return true
-	case <-t.ctx.Done():
-		return false
-	}
-}
-
-// openServerStream reads one connection of the stream. A server may answer
-// 405 to say that it has no such stream.
-func (t *HTTPTransport) openServerStream(state *listenState) streamOutcome {
-	request, err := t.newRequest(t.ctx, http.MethodGet, nil)
-	if err != nil {
-		return streamFailed
-	}
-	if version := t.negotiatedVersion(); version != "" {
-		request.Header.Set(headerProtocolVersion, version)
-	}
-	if state.lastEventID != "" {
-		request.Header.Set(headerLastEventID, state.lastEventID)
-	}
-	response, err := t.client.Do(request)
-	if err != nil {
-		return streamFailed
-	}
-	defer response.Body.Close()
-	if response.StatusCode != http.StatusOK || !hasMediaType(response, "text/event-stream") {
-		return streamUnsupported
-	}
-	err = readEvents(response.Body, func(event sseEvent) error {
-		state.lastEventID = event.ID
-		if event.Retry > 0 {
-			state.retry = event.Retry
-		}
-		t.receiveEvent(event)
-		return nil
-	})
-	if err != nil {
-		return streamFailed
-	}
-	return streamEnded
 }
 
 // Close ends the session, when the server has one, and stops every request

@@ -58,13 +58,26 @@ func endOfStream(err error) error {
 }
 
 // readLine returns a line without its terminator. It fails when the stream
-// ends in the middle of a line, which drops that partial line.
+// ends in the middle of a line, which drops that partial line. Every kind of
+// line is bounded, comments included, so that a server cannot make the reader
+// allocate for ever with a line that never ends.
 func readLine(reader *bufio.Reader) (string, error) {
-	line, err := reader.ReadString('\n')
-	if err != nil {
-		return "", err
+	var line []byte
+	for {
+		chunk, err := reader.ReadSlice('\n')
+		line = append(line, chunk...)
+		if len(line) > maxEventSize {
+			return "", fmt.Errorf("%w (%d bytes)", errEventTooLarge, maxEventSize)
+		}
+		if errors.Is(err, bufio.ErrBufferFull) {
+			continue
+		}
+		if err != nil {
+			return "", err
+		}
+		text := strings.TrimSuffix(strings.TrimSuffix(string(line), "\n"), "\r")
+		return text, nil
 	}
-	return strings.TrimSuffix(strings.TrimSuffix(line, "\n"), "\r"), nil
 }
 
 // eventBuilder collects the fields of the event being read.

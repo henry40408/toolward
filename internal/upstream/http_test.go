@@ -49,6 +49,15 @@ func TestBuildHeadersErrors(t *testing.T) {
 	}
 }
 
+func TestBuildHeadersRejectsTheHeadersTheTransportOwns(t *testing.T) {
+	for _, name := range []string{"Accept", "mcp-session-id", "LAST-EVENT-ID"} {
+		_, err := BuildHeaders(map[string]string{name: "v"}, store.NewMemoryWith(nil))
+		if err == nil || !strings.Contains(err.Error(), "is reserved") || !strings.Contains(err.Error(), name) {
+			t.Errorf("%s: err = %v", name, err)
+		}
+	}
+}
+
 func TestBuildHeadersNeverEchoesAValueInAnError(t *testing.T) {
 	secrets := store.NewMemoryWith(map[string]string{"tok": "s3cr3t"})
 

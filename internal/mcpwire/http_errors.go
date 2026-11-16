@@ -10,7 +10,8 @@ import (
 // connection cannot continue and must be opened again.
 var ErrSessionExpired = errors.New("session expired (HTTP 404)")
 
-// AuthorizationRequiredError means the server answered 401 with a challenge.
+// AuthorizationRequiredError means the server answered 401, or 403 for a
+// token that lacks a scope, with a challenge.
 type AuthorizationRequiredError struct {
 	// Challenge is the WWW-Authenticate header.
 	Challenge string

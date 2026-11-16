@@ -2,6 +2,7 @@ package mcpwire
 
 import (
 	"errors"
+	"io"
 	"reflect"
 	"strings"
 	"testing"
@@ -55,6 +56,46 @@ func TestReadEventsRefusesAnEventOverTheLimit(t *testing.T) {
 	line := "data: " + strings.Repeat("x", maxEventSize/2) + "\n"
 	err := readEvents(strings.NewReader(line+line+line+"\n"), func(sseEvent) error { return nil })
 	if !errors.Is(err, errEventTooLarge) {
+		t.Errorf("err = %v", err)
+	}
+}
+
+// endlessReader gives the same byte for ever, so that a test can offer a huge
+// line without holding it in memory.
+type endlessReader byte
+
+func (r endlessReader) Read(p []byte) (int, error) {
+	for i := range p {
+		p[i] = byte(r)
+	}
+	return len(p), nil
+}
+
+func TestReadEventsBoundsEveryKindOfLine(t *testing.T) {
+	tests := []struct {
+		name   string
+		prefix string
+		fill   byte
+	}{
+		{"a comment", "", ':'},
+		{"a data line", "data: ", 'x'},
+		{"an id line", "id: ", 'x'},
+		{"a line of no field", "", 'x'},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			endless := io.LimitReader(endlessReader(test.fill), maxEventSize+1024*1024)
+			err := readEvents(io.MultiReader(strings.NewReader(test.prefix), endless), func(sseEvent) error { return nil })
+			if !errors.Is(err, errEventTooLarge) {
+				t.Errorf("err = %v", err)
+			}
+		})
+	}
+}
+
+func TestReadEventsAcceptsALineJustUnderTheLimit(t *testing.T) {
+	line := strings.Repeat(":", maxEventSize-1) + "\n\n"
+	if err := readEvents(strings.NewReader(line), func(sseEvent) error { return nil }); err != nil {
 		t.Errorf("err = %v", err)
 	}
 }

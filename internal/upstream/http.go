@@ -58,11 +58,22 @@ func addHeader(built *BuiltHeaders, key, value string, secretStore store.Store) 
 		return fmt.Errorf("invalid value for header %q", key)
 	}
 	canonical := http.CanonicalHeaderKey(key)
+	if reservedHeaders[canonical] {
+		return fmt.Errorf("header %q is reserved: the transport sets it", key)
+	}
 	if _, set := built.Header[canonical]; set {
 		return fmt.Errorf("header %q is set twice (names ignore case)", key)
 	}
 	built.Header[canonical] = []string{expanded}
 	return nil
+}
+
+// reservedHeaders are the headers the transport sets for the protocol. A
+// configured value would break the negotiation without a sign.
+var reservedHeaders = map[string]bool{
+	"Accept":         true,
+	"Mcp-Session-Id": true,
+	"Last-Event-Id":  true,
 }
 
 // validHeaderName accepts the token characters of RFC 9110.
