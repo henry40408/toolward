@@ -41,10 +41,27 @@ type tokenResponseWire struct {
 
 // UnmarshalJSON reads the stored shape. Its error never holds the input.
 func (t *TokenResponse) UnmarshalJSON(data []byte) error {
+	return t.decode(data, "")
+}
+
+// ParseTokenResponse reads the body of a token endpoint. A server may leave
+// out token_type, which then is bearer.
+func ParseTokenResponse(body []byte) (TokenResponse, error) {
+	var response TokenResponse
+	err := response.decode(body, "bearer")
+	return response, err
+}
+
+// decode reads a token response. defaultType is used when the input has no
+// token_type; with "" such an input is an error.
+func (t *TokenResponse) decode(data []byte, defaultType string) error {
 	var wire tokenResponseWire
 	var all map[string]json.RawMessage
 	if json.Unmarshal(data, &wire) != nil || json.Unmarshal(data, &all) != nil {
 		return errors.New("invalid token response")
+	}
+	if wire.TokenType == nil && defaultType != "" {
+		wire.TokenType = &defaultType
 	}
 	if wire.AccessToken == nil || wire.TokenType == nil {
 		return errors.New("invalid token response")

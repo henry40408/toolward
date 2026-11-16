@@ -13,13 +13,13 @@ func ValidatedAuthURL(raw string) (*url.URL, error) {
 	if err != nil || parsed.Scheme == "" {
 		return nil, errors.New("the server gave an invalid authorization URL")
 	}
-	if parsed.Scheme == "https" || parsed.Scheme == "http" && isLoopbackName(parsed.Hostname()) {
+	if parsed.Scheme == "https" || parsed.Scheme == "http" && isLoopbackAuthHost(parsed.Hostname()) {
 		return parsed, nil
 	}
 	return nil, errors.New("the server's authorization URL is not https")
 }
 
-func isLoopbackName(host string) bool {
+func isLoopbackAuthHost(host string) bool {
 	switch strings.ToLower(host) {
 	case "localhost", "127.0.0.1", "::1":
 		return true

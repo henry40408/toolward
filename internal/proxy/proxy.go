@@ -13,6 +13,7 @@ import (
 
 	"github.com/henry40408/toolward/internal/config"
 	"github.com/henry40408/toolward/internal/mcpwire"
+	"github.com/henry40408/toolward/internal/oauth"
 	"github.com/henry40408/toolward/internal/store"
 	"github.com/henry40408/toolward/internal/upstream"
 	"github.com/henry40408/toolward/internal/version"
@@ -87,7 +88,7 @@ func connectorFor(name string, options FromConfigOptions) (upstream.Connector, e
 		return nil, err
 	}
 	if transport.HTTP != nil {
-		return httpConnector(transport.HTTP, options)
+		return httpConnector(name, transport.HTTP, options)
 	}
 	return &upstream.StdioConnector{
 		Name: name,
@@ -101,9 +102,9 @@ func connectorFor(name string, options FromConfigOptions) (upstream.Connector, e
 	}, nil
 }
 
-func httpConnector(transport *config.HTTPTransport, options FromConfigOptions) (upstream.Connector, error) {
+func httpConnector(name string, transport *config.HTTPTransport, options FromConfigOptions) (upstream.Connector, error) {
 	if transport.OAuth != nil {
-		return nil, fmt.Errorf("OAuth upstreams are not supported yet")
+		return oauthConnector(name, transport, options)
 	}
 	return &upstream.HTTPConnector{
 		Spec:  upstream.HTTPSpec{URL: transport.URL, Headers: transport.Headers},
@@ -167,4 +168,20 @@ func (p *Proxy) HandleRequest(ctx context.Context, method string, params json.Ra
 		return p.getPrompt(ctx, params)
 	}
 	return nil, mcpwire.MethodNotFound(method)
+}
+
+// oauthConnector fails for a server whose name cannot make an OAuth account,
+// so that the server is skipped. Headers of the config are not sent: the
+// bearer token is the credential.
+func oauthConnector(name string, transport *config.HTTPTransport, options FromConfigOptions) (upstream.Connector, error) {
+	if _, err := oauth.AccountFor(name); err != nil {
+		return nil, err
+	}
+	return &oauth.Connector{
+		Server:       name,
+		URL:          transport.URL,
+		ClientSecret: transport.OAuth.ClientSecret,
+		Store:        options.Store,
+		Log:          options.Log,
+	}, nil
 }
