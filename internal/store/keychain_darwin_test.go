@@ -3,6 +3,7 @@
 package store
 
 import (
+	"errors"
 	"os"
 	"testing"
 )
@@ -34,5 +35,19 @@ func TestKeychainRoundTrip(t *testing.T) {
 	}
 	if removed, _ := kc.Delete(account); removed {
 		t.Fatal("second delete removed something")
+	}
+}
+
+// A bad account is refused before any Keychain call, so no prompt can appear.
+func TestKeychainRejectsBadAccount(t *testing.T) {
+	var target *InvalidAccountError
+	if err := (&Keychain{}).Set("bad/name", "x"); !errors.As(err, &target) {
+		t.Fatalf("Set: got %v", err)
+	}
+	if _, _, err := (&Keychain{}).Get("bad/name"); !errors.As(err, &target) {
+		t.Fatalf("Get: got %v", err)
+	}
+	if _, err := (&Keychain{}).Delete("bad/name"); !errors.As(err, &target) {
+		t.Fatalf("Delete: got %v", err)
 	}
 }

@@ -288,3 +288,42 @@ func TestDefaultPath(t *testing.T) {
 		t.Errorf("without XDG_CONFIG_HOME: %q", got)
 	}
 }
+
+func TestSyntaxErrorsDoNotEchoConfigText(t *testing.T) {
+	for _, text := range []string{
+		`{"env":{"A":ghp_abc123}}`,
+		`{"env":{"A":ghp abc123}}`,
+		`tghp_abc123`,
+		"{\"a\":\nghp_abc123}",
+	} {
+		got := parseError(t, text)
+		if strings.Contains(got, "ghp") || strings.Contains(got, "abc123") {
+			t.Errorf("%q: error quotes the input: %q", text, got)
+		}
+		if !strings.Contains(got, "invalid JSON on line") {
+			t.Errorf("%q: %q has no position", text, got)
+		}
+	}
+}
+
+func TestNullDocumentsWithWhitespaceAreEmpty(t *testing.T) {
+	for _, text := range []string{"null\n", " null ", "// c\nnull"} {
+		if got := parseError(t, text); !strings.Contains(got, "config file is empty") {
+			t.Errorf("%q: %q", text, got)
+		}
+	}
+}
+
+func TestRejectsNullForListsAndMaps(t *testing.T) {
+	for _, text := range []string{
+		`{"mcpServers": null}`,
+		oneServer(`{"command": "x", "args": null}`),
+		oneServer(`{"command": "x", "env": null}`),
+		oneServer(`{"url": "https://x/mcp", "headers": null}`),
+	} {
+		if got := parseError(t, text); !strings.Contains(got, "invalid config") {
+			t.Errorf("%s: %q", text, got)
+		}
+	}
+	mustParse(t, oneServer(`{"type": null, "command": "x"}`))
+}

@@ -232,3 +232,9 @@ func TestCachedRejectsABadAccountBeforeReading(t *testing.T) {
 		t.Fatal("the inner store was read")
 	}
 }
+
+func TestCachedWithNilLogSurvivesAFailedRead(t *testing.T) {
+	if _, _, err := NewCached(&failing{}, nil).Get("a"); err == nil {
+		t.Fatal("expected an error")
+	}
+}

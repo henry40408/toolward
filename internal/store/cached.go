@@ -33,8 +33,11 @@ type Cached struct {
 	secrets map[string]cachedSecret
 }
 
-// NewCached wraps inner. A failed read is logged to log; the secret never is.
+// NewCached wraps inner. A nil log discards the messages. A failed read is logged to log; the secret never is.
 func NewCached(inner Store, log io.Writer) *Cached {
+	if log == nil {
+		log = io.Discard
+	}
 	return &Cached{
 		inner:   inner,
 		log:     log,

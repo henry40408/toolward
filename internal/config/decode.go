@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 )
@@ -20,11 +21,28 @@ func decodeObject(data []byte, known map[string]any) (map[string]json.RawMessage
 			extra[name] = raw
 			continue
 		}
+		if isNull(raw) && rejectsNull(target) {
+			return nil, fmt.Errorf("field %q: expected a value, found null", name)
+		}
 		if err := json.Unmarshal(raw, target); err != nil {
 			return nil, fmt.Errorf("field %q: %w", name, err)
 		}
 	}
 	return extra, nil
+}
+
+func isNull(raw json.RawMessage) bool {
+	return bytes.Equal(bytes.TrimSpace(raw), []byte("null"))
+}
+
+// rejectsNull matches serde: null is no substitute for a missing list or map.
+// Optional scalars and objects accept it.
+func rejectsNull(target any) bool {
+	switch target.(type) {
+	case *map[string]*ServerConfig, *[]string, *map[string]string:
+		return true
+	}
+	return false
 }
 
 func decode(data []byte) (*Config, error) {

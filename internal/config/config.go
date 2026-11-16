@@ -5,6 +5,7 @@
 package config
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 
 	"github.com/tailscale/hujson"
@@ -59,7 +61,7 @@ func Parse(text string) (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
-	if string(standard) == "null" {
+	if bytes.Equal(bytes.TrimSpace(standard), []byte("null")) {
 		return nil, ErrEmpty
 	}
 	config, err := decode(standard)
@@ -81,7 +83,19 @@ func standardize(text string) ([]byte, error) {
 	if isBlank(text) {
 		return nil, ErrEmpty
 	}
-	return nil, fmt.Errorf("invalid JSON: %v", err)
+	return nil, syntaxError(err)
+}
+
+var errorPosition = regexp.MustCompile(`^hujson: line (\d+), column (\d+):`)
+
+// syntaxError reports only where the syntax error is. The parser's own text
+// quotes the input, and the config may already hold a literal secret.
+func syntaxError(err error) error {
+	match := errorPosition.FindStringSubmatch(err.Error())
+	if match == nil {
+		return errors.New("invalid JSON")
+	}
+	return fmt.Errorf("invalid JSON on line %s column %s", match[1], match[2])
 }
 
 // isBlank reports whether text holds nothing but whitespace and comments.
