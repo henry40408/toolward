@@ -8,11 +8,11 @@ require github.com/keybase/go-keychain v0.0.1
 
 require github.com/tailscale/hujson v0.0.0-20260727124030-b80ff77dac4f
 
-require golang.org/x/term v0.47.0
+require golang.org/x/term v0.48.0
 
 require (
-	golang.org/x/net v0.60.0
-	golang.org/x/text v0.42.0 // indirect
+	golang.org/x/net v0.62.0
+	golang.org/x/text v0.43.0 // indirect
 )
 
 require (
@@ -22,7 +22,7 @@ require (
 	github.com/segmentio/encoding v0.5.4 // indirect
 	github.com/yosida95/uritemplate/v3 v3.0.2 // indirect
 	golang.org/x/oauth2 v0.38.0
-	golang.org/x/sync v0.23.0 // indirect
-	golang.org/x/sys v0.49.0 // indirect
+	golang.org/x/sync v0.24.0 // indirect
+	golang.org/x/sys v0.50.0 // indirect
 	golang.org/x/time v0.15.0 // indirect
 )
