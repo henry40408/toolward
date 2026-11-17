@@ -16,10 +16,19 @@ type session struct {
 	secrets *store.Memory
 	stdin   string
 	env     map[string]string
+	// openStore replaces the in-memory store when a test needs it to fail.
+	openStore func() (store.Store, error)
 }
 
 func newSession(t *testing.T) *session {
 	return &session{t: t, secrets: store.NewMemory(), env: map[string]string{}}
+}
+
+func (s *session) newStore() (store.Store, error) {
+	if s.openStore != nil {
+		return s.openStore()
+	}
+	return s.secrets, nil
 }
 
 func (s *session) run(args ...string) (stdout, stderr string, code int) {
@@ -43,7 +52,7 @@ func (s *session) run(args ...string) (stdout, stderr string, code int) {
 		stdin:    stdin,
 		stdout:   &out,
 		stderr:   &errw,
-		newStore: func() (store.Store, error) { return s.secrets, nil },
+		newStore: s.newStore,
 	})
 	return out.String(), errw.String(), code
 }
