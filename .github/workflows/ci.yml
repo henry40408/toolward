@@ -30,6 +30,16 @@ jobs:
           go mod vendor
           test -z "$(git status --porcelain -- vendor go.mod go.sum)"
       - run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
+      # Every dependency, test-only ones included, must carry a permissive
+      # licence. go-licenses fails on a standard-library package unless GOROOT
+      # is set explicitly. A module licensed under several terms passes when
+      # each of them is on the list.
+      - name: Check licences
+        env:
+          ALLOWED_LICENSES: Apache-2.0,BSD-2-Clause,BSD-3-Clause,ISC,MIT,MIT-0,Zlib,Unlicense,CC0-1.0,Unicode-3.0,BSL-1.0
+        run: |
+          GOROOT="$(go env GOROOT)" go run github.com/google/go-licenses/v2@v2.0.1 \
+            check ./... --include_tests --allowed_licenses="$ALLOWED_LICENSES"
 
   # macOS as well as Linux: the Keychain store only builds on darwin.
   lint:
