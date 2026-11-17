@@ -1,3 +1,4 @@
-/target
 /.claude/
-/mutants.out*
+/bin/
+/coverage*.out
+/covdata/

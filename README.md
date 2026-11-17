@@ -3,7 +3,7 @@
 [![CI](https://github.com/henry40408/toolward/actions/workflows/ci.yml/badge.svg)](https://github.com/henry40408/toolward/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/henry40408/toolward)](https://github.com/henry40408/toolward/releases/latest)
 [![License](https://img.shields.io/github/license/henry40408/toolward)](LICENSE.txt)
-[![Rust toolchain](https://img.shields.io/badge/dynamic/toml?url=https://raw.githubusercontent.com/henry40408/toolward/main/rust-toolchain.toml&query=$.toolchain.channel&label=rust%20toolchain&logo=rust)](https://www.rust-lang.org/)
+[![Go version](https://img.shields.io/github/go-mod/go-version/henry40408/toolward)](go.mod)
 [![Casual Maintenance Intended](https://casuallymaintained.tech/badge.svg)](https://casuallymaintained.tech/)
 [![Vibe Coded](https://img.shields.io/badge/vibe_coded-Claude-d97757?logo=anthropic&logoColor=white)](https://claude.com/claude-code)
 
@@ -22,9 +22,21 @@ Claude Code ──stdio──> toolward serve ──stdio──> local MCP serve
 
 ## Install
 
+Needs macOS, the Go version in [go.mod](go.mod), and cgo (the Xcode Command Line Tools: `xcode-select --install`), because the Keychain code calls the Security framework.
+
+Check out the repository, then install or build from it. `go install ...@latest` does not work until a Go release is tagged: the older tags are the Rust version.
+
 ```sh
-cargo install --path . --locked
+go install ./cmd/toolward
+# or
+go build -o bin/toolward ./cmd/toolward
 ```
+
+### Upgrading from the Rust version
+
+The Keychain items keep the same service and account names, so your secrets are found. The new binary is not on the access list of items the Rust build wrote, so macOS shows an allow dialog once per account. If `secret set` or `secret delete` fails with error -25244, the item belongs to the other build: run `security delete-generic-password -s toolward -a <name>` and then `toolward secret set <name>` again. An OAuth login that fails to refresh for this reason needs `toolward auth login <server>` again.
+
+A build from a checkout reports the version Go stamps from VCS. To set it, add `-ldflags "-X github.com/henry40408/toolward/internal/version.version=$GIT_VERSION"`.
 
 ## Quick start
 
@@ -73,6 +85,7 @@ The format is the usual `mcpServers` map. Differences:
 - It is not allowed in `command`, `args` or `url`: those can show in process lists and logs. Put the secret in `env` or a header.
 - A server name is at most 20 characters, ASCII letters, digits, `-` and `_`, without `__`.
 - Use `--config <path>` for another config file.
+- Config files are strict JSONC: comments and trailing commas are allowed, but unquoted keys, single-quoted strings, hex numbers and missing commas are not. The Rust version accepted some of these, so an old config that used them fails with "invalid JSON" and must be quoted.
 
 ### OAuth 2 (for example Sentry)
 
@@ -141,20 +154,19 @@ The toolward config holds only references, but it also lists your accounts. Keep
 
 - Resource templates are not forwarded, and URIs inside resource links are not rewritten.
 - A server that fails to start is left out of `tools/list`; `toolward check --tools` shows why.
+- OAuth requests refuse private and loopback addresses, and numeric hosts such as `2130706433` or `127.1`. A host name that goes through an `HTTP_PROXY`/`HTTPS_PROXY` is resolved by the proxy, so only the proxy can refuse it. The proxy host itself is trusted.
 - Several `serve` processes can refresh the same OAuth token at once.
 
 ## Development
 
 ```sh
-cargo fmt
-cargo clippy --all-targets --locked -- -D warnings
-cargo build --examples            # the integration tests start examples/fake_upstream
-cargo nextest run --locked        # tests; cargo test --doc runs the doctests
-cargo deny check                  # advisories and licenses
-cargo mutants --in-diff changes.diff      # optional: do the tests catch injected bugs? Save `git diff main` as changes.diff first; a full run takes about an hour
+gofmt -l $(git ls-files '*.go' | grep -v '^vendor/')   # must print nothing
+go vet ./...
+go run honnef.co/go/tools/cmd/staticcheck@v0.8.2 ./...
+go test -race ./...
 ```
 
-The Rust version is pinned in `rust-toolchain.toml`. See [ARCHITECTURE.md](ARCHITECTURE.md) for how the code is organized.
+Third-party modules are vendored: run `go mod vendor` after changing a dependency and commit `vendor/` with `go.mod` and `go.sum`. See [ARCHITECTURE.md](ARCHITECTURE.md) for how the code is organized and [CLAUDE.md](CLAUDE.md) for the full list of checks.
 
 ## License
 
