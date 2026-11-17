@@ -94,7 +94,8 @@ jobs:
           fail_ci_if_error: false
 
   # Advisory, like the Rust mutants job it replaces: a surviving mutant is a
-  # hint to read, not a failure.
+  # hint to read, not a failure. Pull requests mutate only the changed lines;
+  # pushes to main mutate the whole module.
   mutation:
     name: mutation
     runs-on: ubuntu-latest
@@ -103,6 +104,8 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # `--diff` needs the base branch's history, not a shallow clone.
+          fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
@@ -111,8 +114,18 @@ jobs:
       # took. A cached test result makes that near zero, so nearly every mutant
       # "times out" and the score means nothing.
       - run: go clean -testcache
-      - run: |
+      - name: Mutate the whole module (push)
+        if: github.event_name != 'pull_request'
+        run: |
           go run github.com/go-gremlins/gremlins/cmd/gremlins@v0.6.0 unleash \
+            -E '^vendor/' --threshold-efficacy 95 .
+      - name: Mutate the changed lines (pull request)
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          go run github.com/go-gremlins/gremlins/cmd/gremlins@v0.6.0 unleash \
+            --diff "origin/$BASE_REF" \
             -E '^vendor/' --threshold-efficacy 95 .
 
   lint-workflow:
