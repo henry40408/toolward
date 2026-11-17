@@ -105,7 +105,11 @@ jobs:
 
   # Advisory, like the Rust mutants job it replaces: a surviving mutant is a
   # hint to read, not a failure. Pull requests mutate only the changed lines;
-  # pushes to main mutate the whole module.
+  # pushes to main mutate the whole module. The efficacy threshold and the
+  # `vendor/` exclusion live in .gremlins.yaml: gremlins v0.6.0 ignores
+  # `--threshold-efficacy` on the command line, so never pass it here. A score
+  # at or below 95% fails the step, but `continue-on-error` keeps the job
+  # advisory.
   mutation:
     name: mutation
     runs-on: ubuntu-latest
@@ -127,16 +131,26 @@ jobs:
       - name: Mutate the whole module (push)
         if: github.event_name != 'pull_request'
         run: |
-          go run github.com/go-gremlins/gremlins/cmd/gremlins@v0.6.0 unleash \
-            -E '^vendor/' --threshold-efficacy 95 .
+          go run github.com/go-gremlins/gremlins/cmd/gremlins@v0.6.0 unleash .
       - name: Mutate the changed lines (pull request)
         if: github.event_name == 'pull_request'
         env:
           BASE_REF: ${{ github.base_ref }}
         run: |
+          status=0
           go run github.com/go-gremlins/gremlins/cmd/gremlins@v0.6.0 unleash \
-            --diff "origin/$BASE_REF" \
-            -E '^vendor/' --threshold-efficacy 95 .
+            --diff "origin/$BASE_REF" . > "$RUNNER_TEMP/mutation.log" 2>&1 || status=$?
+          cat "$RUNNER_TEMP/mutation.log"
+          # A diff with no mutable Go line (docs, CI only) yields zero mutants,
+          # which gremlins scores as 0% and so fails the threshold. That is not
+          # a low score, so treat it as a pass.
+          if [ "$status" -ne 0 ] \
+            && grep -q '^Killed: 0, Lived: 0, Not covered: 0$' "$RUNNER_TEMP/mutation.log" \
+            && grep -q '^Timed out: 0, ' "$RUNNER_TEMP/mutation.log"; then
+            echo "No mutants in the changed lines; nothing to test."
+            exit 0
+          fi
+          exit "$status"
 
   lint-workflow:
     name: lint-workflow
