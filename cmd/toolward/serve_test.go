@@ -27,6 +27,7 @@ type runningServe struct {
 
 func startServe(t *testing.T) *runningServe {
 	t.Helper()
+	requireCredentialStore(t)
 	config := writeConfig(t, fmt.Sprintf(`{"mcpServers":{
 		"fake":{"command":%q,"env":{%q:"1"}},
 		"broken":{"command":"/nonexistent/toolward-test-binary"}

@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -19,6 +20,16 @@ import (
 const processWait = 30 * time.Second
 
 var toolwardBinary string
+
+// requireCredentialStore skips a test whose command opens the credential
+// store. Only macOS has one, and the in-memory store is not reachable from the
+// built binary.
+func requireCredentialStore(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS != "darwin" {
+		t.Skip("the binary needs the macOS Keychain")
+	}
+}
 
 // coverDir is where a `-cover` binary writes its profile; empty means the
 // binary is built plain.
@@ -138,6 +149,7 @@ func TestUsageErrorsExitWithTwo(t *testing.T) {
 }
 
 func TestCheckOfAConfigWithoutSecretsPasses(t *testing.T) {
+	requireCredentialStore(t)
 	config := writeConfig(t, `{"mcpServers":{"plain":{"command":"x"}}}`)
 	stdout, stderr, code := runToCompletion(t, "--config", config, "check")
 	if code != 0 || stderr != "" || !strings.Contains(stdout, "plain") {
