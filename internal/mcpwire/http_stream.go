@@ -115,7 +115,7 @@ func (t *HTTPTransport) resumeOnce(ctx context.Context, stream *answerStream) er
 	if outcome != streamOpen {
 		return errResumeRefused
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 	return t.readAnswer(response.Body, stream)
 }
 
@@ -202,7 +202,7 @@ func (t *HTTPTransport) openServerStream(state *streamPosition) streamOutcome {
 	if outcome != streamOpen {
 		return outcome
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 	err := readEvents(response.Body, func(event sseEvent) error {
 		state.observe(event)
 		t.receiveEvent(event)

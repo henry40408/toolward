@@ -65,7 +65,7 @@ func (c *Cached) readThrough(account string) (string, bool, error) {
 	secret, found, err := c.inner.Get(account)
 	if err != nil {
 		// Routine reads stay silent. Log only a failure, and never the secret.
-		fmt.Fprintf(c.log, "toolward: reading credential store account %q failed: %v\n", account, err)
+		_, _ = fmt.Fprintf(c.log, "toolward: reading credential store account %q failed: %v\n", account, err)
 		return "", false, err
 	}
 	if found {

@@ -53,7 +53,7 @@ func (p *planner) unique(wanted string) string {
 func (p *planner) extractSecrets(server, kind string, table object) {
 	for _, key := range slices.Sorted(maps.Keys(table)) {
 		text, ok := table[key].(string)
-		if !ok || text == "" || !(looksSecret(key) || hasSecretPrefix(text)) {
+		if !ok || text == "" || (!looksSecret(key) && !hasSecretPrefix(text)) {
 			continue
 		}
 		if strings.Contains(text, "${") {

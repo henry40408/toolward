@@ -122,6 +122,6 @@ func (c *StdioConnector) relayStderr(secrets []string) func(string) {
 			return
 		}
 		text := strings.ToValidUTF8(strings.TrimRightFunc(line, unicode.IsSpace), "�")
-		fmt.Fprintf(c.Log, "[%s] %s\n", c.Name, redact.Redact(text, secrets))
+		_, _ = fmt.Fprintf(c.Log, "[%s] %s\n", c.Name, redact.Redact(text, secrets))
 	}
 }

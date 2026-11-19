@@ -74,7 +74,7 @@ func legacyMetadata(base *url.URL) AuthorizationMetadata {
 // the authorization code with an S256 challenge.
 func (m AuthorizationMetadata) ValidateForCodeFlow() error {
 	if m.ResponseTypesSupported != nil && !contains(*m.ResponseTypesSupported, "code") {
-		return errors.New("Invalid scope: code")
+		return errors.New("Invalid scope: code") //nolint:staticcheck // ST1005: user-facing text that matches rmcp
 	}
 	if m.CodeChallengeMethods != nil && !contains(*m.CodeChallengeMethods, "S256") {
 		return errors.New("Authorization server does not support the required PKCE code challenge method (S256)")
@@ -177,17 +177,17 @@ func (m *resourceMetadata) namesAuthorizationServer() bool {
 // validateResource checks that the document is about the server at base.
 func (m *resourceMetadata) validateResource(base *url.URL) error {
 	if m.Resource == nil {
-		return errors.New("Protected resource metadata missing required resource field")
+		return errors.New("Protected resource metadata missing required resource field") //nolint:staticcheck // ST1005: user-facing text that matches rmcp
 	}
 	resource, err := url.Parse(*m.Resource)
 	if err != nil || resource.Scheme == "" {
-		return fmt.Errorf("Protected resource metadata resource field is not a valid URL: %s", *m.Resource)
+		return fmt.Errorf("Protected resource metadata resource field is not a valid URL: %s", *m.Resource) //nolint:staticcheck // ST1005: user-facing text that matches rmcp
 	}
 	if resource.Fragment != "" || strings.Contains(*m.Resource, "#") {
-		return errors.New("Protected resource metadata resource does not permit fragment in URL as specified by RFC 8707")
+		return errors.New("Protected resource metadata resource does not permit fragment in URL as specified by RFC 8707") //nolint:staticcheck // ST1005: user-facing text that matches rmcp
 	}
 	if !isResourceIdentifierValid(base, resource) {
-		return fmt.Errorf("Protected resource metadata resource mismatch: reference '%s', permitted '%s'", base, resource)
+		return fmt.Errorf("Protected resource metadata resource mismatch: reference '%s', permitted '%s'", base, resource) //nolint:staticcheck // ST1005: user-facing text that matches rmcp
 	}
 	return nil
 }

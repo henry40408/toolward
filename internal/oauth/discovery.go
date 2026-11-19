@@ -203,7 +203,7 @@ func invalidResourceMetadata(location *url.URL, from origin, reason string) erro
 	if from == originGuessed {
 		return nil
 	}
-	return fmt.Errorf("Protected resource metadata at %s is unusable: %s", redactedURL(location), reason)
+	return fmt.Errorf("Protected resource metadata at %s is unusable: %s", redactedURL(location), reason) //nolint:staticcheck // ST1005: user-facing text that matches rmcp
 }
 
 // fromResourceMetadata walks the authorization servers the document names and
@@ -228,7 +228,7 @@ func (f *finder) fromResourceMetadata(ctx context.Context, found *foundResource)
 	if len(candidates) == 0 {
 		return nil, nil
 	}
-	return nil, fmt.Errorf("Protected resource metadata at %s names authorization servers %s, but none published usable metadata",
+	return nil, fmt.Errorf("Protected resource metadata at %s names authorization servers %s, but none published usable metadata", //nolint:staticcheck // ST1005: user-facing text that matches rmcp
 		redactedURL(found.url), strings.Join(candidates, ", "))
 }
 

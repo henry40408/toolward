@@ -63,7 +63,7 @@ func TestSecretSetReportsAnUnreadableStdin(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	stdin.Close() // reading a closed file fails
+	_ = stdin.Close() // reading a closed file fails
 	var out, errw bytes.Buffer
 	code := run(process{
 		args:     []string{"secret", "set", "gh"},

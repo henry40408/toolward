@@ -170,7 +170,7 @@ func TestHTTPAResponseThatIsNotJSONFailsARequest(t *testing.T) {
 func TestHTTPTransportWriteRejectsAnInvalidMessage(t *testing.T) {
 	stub := newHTTPStub(t, func(w http.ResponseWriter, _ *http.Request, _ message) { w.WriteHeader(http.StatusAccepted) })
 	transport := NewHTTPTransport(HTTPConfig{URL: stub.URL})
-	defer transport.Close()
+	defer func() { _ = transport.Close() }()
 	err := transport.Write([]byte("{not json"))
 	if err == nil || !strings.HasPrefix(err.Error(), "invalid message: ") {
 		t.Fatalf("err = %v", err)
@@ -189,7 +189,7 @@ func TestHTTPTransportWriteSendsANotificationAndACancellation(t *testing.T) {
 		}
 	})
 	transport := NewHTTPTransport(HTTPConfig{URL: stub.URL})
-	defer transport.Close()
+	defer func() { _ = transport.Close() }()
 
 	if err := transport.Write([]byte(`{"jsonrpc":"2.0","method":"notifications/roots/list_changed"}`)); err != nil {
 		t.Fatal(err)

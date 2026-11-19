@@ -81,7 +81,7 @@ func (c *Callback) Wait(ctx context.Context, expectedState string) (string, erro
 
 // serve answers one connection. done is true when the wait is over.
 func (c *Callback) serve(conn net.Conn, expectedState string) (redirect string, done bool, err error) {
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	target, ok := readRequestTarget(conn, c.readTimeout)
 	if !ok {
 		respond(conn, "400 Bad Request", "Bad request")

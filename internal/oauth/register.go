@@ -42,14 +42,14 @@ type registrationBody struct {
 // hold server text, so callers mask it.
 func Register(ctx context.Context, client *http.Client, metadata AuthorizationMetadata, request RegistrationRequest) (*RegisteredClient, error) {
 	if metadata.RegistrationEndpoint == nil {
-		return nil, errors.New("Registration failed: Dynamic client registration not supported")
+		return nil, errors.New("Registration failed: Dynamic client registration not supported") //nolint:staticcheck // ST1005: user-facing text that matches rmcp
 	}
 	if err := metadata.ValidateForCodeFlow(); err != nil {
 		return nil, err
 	}
 	body, err := registrationJSON(request)
 	if err != nil {
-		return nil, fmt.Errorf("Registration failed: %w", err)
+		return nil, fmt.Errorf("Registration failed: %w", err) //nolint:staticcheck // ST1005: user-facing text that matches rmcp
 	}
 	answer, err := postRegistration(ctx, client, *metadata.RegistrationEndpoint, body)
 	if err != nil {
@@ -73,15 +73,15 @@ func registrationJSON(request RegistrationRequest) ([]byte, error) {
 func postRegistration(ctx context.Context, client *http.Client, endpoint string, body []byte) (*response, error) {
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
-		return nil, fmt.Errorf("Registration failed: %w", err)
+		return nil, fmt.Errorf("Registration failed: %w", err) //nolint:staticcheck // ST1005: user-facing text that matches rmcp
 	}
 	request.Header.Set("Content-Type", "application/json")
 	answer, err := send(client, request)
 	if err != nil {
-		return nil, fmt.Errorf("Registration failed: HTTP request error: %w", err)
+		return nil, fmt.Errorf("Registration failed: HTTP request error: %w", err) //nolint:staticcheck // ST1005: user-facing text that matches rmcp
 	}
 	if answer.Status < 200 || answer.Status > 299 {
-		return nil, fmt.Errorf("Registration failed: HTTP %d %s: %s", answer.Status, http.StatusText(answer.Status), answer.Body)
+		return nil, fmt.Errorf("Registration failed: HTTP %d %s: %s", answer.Status, http.StatusText(answer.Status), answer.Body) //nolint:staticcheck // ST1005: user-facing text that matches rmcp
 	}
 	return answer, nil
 }
@@ -93,7 +93,7 @@ func parseRegistration(answer *response) (*RegisteredClient, error) {
 		RedirectURIs *[]string `json:"redirect_uris"`
 	}
 	if json.Unmarshal(answer.Body, &wire) != nil || wire.ClientID == nil || wire.RedirectURIs == nil {
-		return nil, errors.New("Registration failed: analyze response error")
+		return nil, errors.New("Registration failed: analyze response error") //nolint:staticcheck // ST1005: user-facing text that matches rmcp
 	}
 	registered := &RegisteredClient{ClientID: *wire.ClientID}
 	// An empty secret means a public client. Sending it as a password would

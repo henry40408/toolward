@@ -146,7 +146,7 @@ func (a *Authorization) Complete(ctx context.Context, client *http.Client, redir
 		return nil, err
 	}
 	if parameters.state != a.State {
-		return nil, errors.New("Internal error: Authorization state not found")
+		return nil, errors.New("Internal error: Authorization state not found") //nolint:staticcheck // ST1005: user-facing text that matches rmcp
 	}
 	metadata := a.request.Discovery.Metadata
 	if err := validateIssuer(metadata, parameters.issuer); err != nil {

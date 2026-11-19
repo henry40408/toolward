@@ -65,7 +65,7 @@ func send(client *http.Client, request *http.Request) (*response, error) {
 	if err != nil {
 		return nil, withoutURL(err)
 	}
-	defer answer.Body.Close()
+	defer func() { _ = answer.Body.Close() }()
 	body, err := io.ReadAll(io.LimitReader(answer.Body, maxOAuthBodyBytes+1))
 	if err != nil {
 		return nil, err

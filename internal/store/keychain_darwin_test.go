@@ -31,7 +31,7 @@ func TestKeychainRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	account := "toolward-test-keychain-round-trip"
-	t.Cleanup(func() { kc.Delete(account) })
+	t.Cleanup(func() { _, _ = kc.Delete(account) })
 	if _, found, err := kc.Get(account); found || err != nil {
 		t.Fatalf("found=%v err=%v", found, err)
 	}

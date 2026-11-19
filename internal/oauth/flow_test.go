@@ -151,7 +151,7 @@ func TestConnectorSendsTheStoredToken(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer session.Peer.Close()
+	defer func() { _ = session.Peer.Close() }()
 	if fake.lastBearer() != "Bearer access-1" {
 		t.Fatalf("bearer %q", fake.lastBearer())
 	}
@@ -189,7 +189,7 @@ func TestConnectorRefreshesAnExpiredToken(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer session.Peer.Close()
+	defer func() { _ = session.Peer.Close() }()
 	refresh := fake.tokenRequests[len(fake.tokenRequests)-1]
 	if refresh.Get("grant_type") != "refresh_token" || refresh.Get("refresh_token") != "refresh-1" || refresh.Get("resource") != fake.mcpURL() || refresh.Get("scope") != "read" {
 		t.Fatalf("refresh request %v", refresh)
@@ -215,7 +215,7 @@ func TestARefreshWithoutANewRefreshTokenKeepsTheOldOne(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer session.Peer.Close()
+	defer func() { _ = session.Peer.Close() }()
 	if *loadCredentials(t, memory).TokenResponse.RefreshToken != "refresh-1" {
 		t.Fatal("the refresh token was lost")
 	}
