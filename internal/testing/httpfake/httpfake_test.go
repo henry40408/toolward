@@ -23,7 +23,7 @@ func post(t *testing.T, fake *Fake, body string, header http.Header) (int, strin
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 	data, _ := io.ReadAll(response.Body)
 	return response.StatusCode, string(data)
 }

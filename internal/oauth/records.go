@@ -75,7 +75,7 @@ func ReadClientRecordLenient(secrets store.Store, server string, log io.Writer) 
 		return record
 	}
 	if log != nil {
-		fmt.Fprintf(log, "toolward: ignoring the unreadable OAuth client record of %q; run `toolward auth login %s` if refreshing fails\n", server, server)
+		_, _ = fmt.Fprintf(log, "toolward: ignoring the unreadable OAuth client record of %q; run `toolward auth login %s` if refreshing fails\n", server, server)
 	}
 	return nil
 }

@@ -39,7 +39,7 @@ func request(t *testing.T, callback *Callback, raw string) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	_, _ = conn.Write([]byte(raw))
 	reply, _ := io.ReadAll(conn)
 	return string(reply)
@@ -120,7 +120,7 @@ func TestAStalledConnectionDoesNotBlockTheNextOne(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer stalled.Close()
+	defer func() { _ = stalled.Close() }()
 	time.Sleep(20 * time.Millisecond)
 	request(t, callback, get("/callback?code=ok&state=s1"))
 	if result := <-results; result.err != nil {

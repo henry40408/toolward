@@ -134,9 +134,9 @@ func TestCachedReadsOnceAndOneAtATime(t *testing.T) {
 func TestCachedForgetsAnAccountAfterSet(t *testing.T) {
 	inner := &probe{}
 	c := newCached(inner)
-	c.Get("a")
-	c.Set("a", "new")
-	c.Get("a")
+	_, _, _ = c.Get("a")
+	_ = c.Set("a", "new")
+	_, _, _ = c.Get("a")
 	if n := inner.reads.Load(); n != 2 {
 		t.Fatalf("reads = %d, want 2", n)
 	}
@@ -145,9 +145,9 @@ func TestCachedForgetsAnAccountAfterSet(t *testing.T) {
 func TestCachedForgetsAnAccountAfterDelete(t *testing.T) {
 	inner := &probe{}
 	c := newCached(inner)
-	c.Get("a")
-	c.Delete("a")
-	c.Get("a")
+	_, _, _ = c.Get("a")
+	_, _ = c.Delete("a")
+	_, _, _ = c.Get("a")
 	if n := inner.reads.Load(); n != 2 {
 		t.Fatalf("reads = %d, want 2", n)
 	}
@@ -160,7 +160,7 @@ func TestCachedDoesNotRememberAMissingSecret(t *testing.T) {
 		t.Fatal("found a secret that does not exist")
 	}
 	// Stored behind the cache's back, as `toolward secret set` would.
-	inner.Set("late", "now")
+	_ = inner.Set("late", "now")
 	if got, found, _ := c.Get("late"); !found || got != "now" {
 		t.Fatalf("got %q %v", got, found)
 	}
@@ -175,13 +175,13 @@ func TestCachedRereadsOnceAfterExpiryThenCachesAgain(t *testing.T) {
 	clk := &clock{now: time.Unix(1000, 0)}
 	c := newCached(inner)
 	c.now = clk.Now
-	c.Get("a")
-	c.Get("a")
+	_, _, _ = c.Get("a")
+	_, _, _ = c.Get("a")
 	if n := inner.reads.Load(); n != 1 {
 		t.Fatalf("reads = %d, want 1", n)
 	}
 	clk.now = clk.now.Add(cacheTTL - time.Nanosecond)
-	c.Get("a")
+	_, _, _ = c.Get("a")
 	if n := inner.reads.Load(); n != 1 {
 		t.Fatalf("an entry just inside the TTL was re-read: %d", n)
 	}

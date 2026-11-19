@@ -24,7 +24,7 @@ func Log(w io.Writer, message string) {
 	if w == nil {
 		return
 	}
-	fmt.Fprintf(w, "toolward: %s\n", message)
+	_, _ = fmt.Fprintf(w, "toolward: %s\n", message)
 }
 
 // ClientInfo is what toolward calls itself when it connects to an upstream.

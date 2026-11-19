@@ -31,7 +31,7 @@ func TestTheCallbackReadsAtMost8KBAndWaitsFiveSeconds(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer fresh.Close()
+	defer func() { _ = fresh.Close() }()
 	if fresh.readTimeout != 5*time.Second {
 		t.Fatalf("read timeout %v", fresh.readTimeout)
 	}

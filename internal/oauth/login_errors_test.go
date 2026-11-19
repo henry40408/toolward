@@ -55,7 +55,7 @@ func TestLoginFailsWhenTheCallbackPortIsTaken(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer listener.Close()
+	defer func() { _ = listener.Close() }()
 	port := uint16(listener.Addr().(*net.TCPAddr).Port)
 
 	fake := newFakeServer(t)

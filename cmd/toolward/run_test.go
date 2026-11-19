@@ -41,7 +41,7 @@ func (s *session) run(args ...string) (stdout, stderr string, code int) {
 	if err != nil {
 		s.t.Fatal(err)
 	}
-	defer stdin.Close()
+	defer func() { _ = stdin.Close() }()
 	var out, errw bytes.Buffer
 	code = run(process{
 		args: args,

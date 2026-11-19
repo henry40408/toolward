@@ -83,7 +83,7 @@ func (f *loginFlow) run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	defer callback.Close()
+	defer func() { _ = callback.Close() }()
 	discovery, clients, err := f.discover(ctx)
 	if err != nil {
 		return err

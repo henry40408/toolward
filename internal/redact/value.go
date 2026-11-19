@@ -116,7 +116,7 @@ func maskObject(object map[string]any, patterns []string, protocol bool) (any, b
 	out := make(map[string]any, len(object))
 	for _, key := range sortedKeys(object) {
 		item := object[key]
-		if !(protocol && slices.Contains(protocolKeys, key)) {
+		if !protocol || !slices.Contains(protocolKeys, key) {
 			masked, keyChanged := maskText(key, patterns)
 			key = masked
 			changed = changed || keyChanged

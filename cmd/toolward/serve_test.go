@@ -107,7 +107,7 @@ func (s *runningServe) waitForExit(t *testing.T) int {
 	done := make(chan error, 1)
 	go func() { done <- s.cmd.Wait() }()
 	select {
-	case <-done:
+	case <-done: //nolint:errcheck // the exit code is read from ProcessState
 		return s.cmd.ProcessState.ExitCode()
 	case <-time.After(processWait):
 		t.Fatalf("toolward did not stop; stderr: %s", s.stderr.String())
