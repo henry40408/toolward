@@ -1,11 +1,12 @@
 package upstream
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
 	"maps"
-	"sort"
+	"slices"
 
 	"github.com/henry40408/toolward/internal/cache"
 	"github.com/henry40408/toolward/internal/mcpwire"
@@ -132,11 +133,8 @@ func (u *Upstream) ToolNames() []ToolName {
 	for exposed, original := range u.tools.exposed {
 		pairs = append(pairs, ToolName{Exposed: exposed, Original: original})
 	}
-	sort.Slice(pairs, func(i, j int) bool {
-		if pairs[i].Exposed != pairs[j].Exposed {
-			return pairs[i].Exposed < pairs[j].Exposed
-		}
-		return pairs[i].Original < pairs[j].Original
+	slices.SortFunc(pairs, func(a, b ToolName) int {
+		return cmp.Or(cmp.Compare(a.Exposed, b.Exposed), cmp.Compare(a.Original, b.Original))
 	})
 	return pairs
 }

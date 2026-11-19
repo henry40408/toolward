@@ -13,11 +13,11 @@ import (
 )
 
 // TokenResponse is the token response of an authorization server, in the JSON
-// shape the Rust version stored (rmcp's StandardTokenResponse with the extra
-// fields kept).
+// shape stored by earlier builds (rmcp's StandardTokenResponse with the extra
+// fields kept), so existing logins keep working.
 type TokenResponse struct {
 	AccessToken string
-	// TokenType is lowercase, as the Rust version wrote it.
+	// TokenType is lowercase, as earlier builds wrote it.
 	TokenType string
 	// ExpiresIn is in seconds. Nil when the server did not say.
 	ExpiresIn    *uint64
@@ -84,7 +84,7 @@ func (t *TokenResponse) decode(data []byte, defaultType string) error {
 	return nil
 }
 
-// MarshalJSON writes the standard fields in the order of the Rust version,
+// MarshalJSON writes the standard fields in the order earlier builds wrote them,
 // then the extra fields sorted by name.
 func (t TokenResponse) MarshalJSON() ([]byte, error) {
 	var buf bytes.Buffer
@@ -127,7 +127,7 @@ func writeMember(buf *bytes.Buffer, key string, value any) {
 	buf.Write(encoded)
 }
 
-// StoredCredentials is the token record, in the JSON shape the Rust version
+// StoredCredentials is the token record, in the JSON shape earlier builds
 // wrote, so existing logins keep working.
 type StoredCredentials struct {
 	ClientID      string         `json:"client_id"`

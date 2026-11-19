@@ -3,7 +3,9 @@ package upstream
 import (
 	"context"
 	"fmt"
+	"maps"
 	"net/http"
+	"slices"
 	"strings"
 
 	"github.com/henry40408/toolward/internal/interpolate"
@@ -37,7 +39,7 @@ type BuiltHeaders struct {
 // prompt. Error text never contains a header value.
 func BuildHeaders(headers map[string]string, secretStore store.Store) (BuiltHeaders, error) {
 	built := BuiltHeaders{Header: http.Header{}}
-	for _, key := range sortedKeys(headers) {
+	for _, key := range slices.Sorted(maps.Keys(headers)) {
 		if err := addHeader(&built, key, headers[key], secretStore); err != nil {
 			return BuiltHeaders{}, err
 		}

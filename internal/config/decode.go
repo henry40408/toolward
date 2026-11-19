@@ -35,8 +35,8 @@ func isNull(raw json.RawMessage) bool {
 	return bytes.Equal(bytes.TrimSpace(raw), []byte("null"))
 }
 
-// rejectsNull matches serde: null is no substitute for a missing list or map.
-// Optional scalars and objects accept it.
+// rejectsNull reports whether the target refuses JSON null: null is no
+// substitute for a missing list or map. Optional scalars and objects accept it.
 func rejectsNull(target any) bool {
 	switch target.(type) {
 	case *map[string]*ServerConfig, *[]string, *map[string]string:

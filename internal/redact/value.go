@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"maps"
 	"slices"
 	"strings"
 )
@@ -114,7 +115,7 @@ func maskItems(items []any, patterns []string, protocol bool) (any, bool) {
 func maskObject(object map[string]any, patterns []string, protocol bool) (any, bool) {
 	changed := false
 	out := make(map[string]any, len(object))
-	for _, key := range sortedKeys(object) {
+	for _, key := range slices.Sorted(maps.Keys(object)) {
 		item := object[key]
 		if !protocol || !slices.Contains(protocolKeys, key) {
 			masked, keyChanged := maskText(key, patterns)
@@ -142,15 +143,6 @@ func isProtocolChild(key string, item any, protocol bool) bool {
 	}
 	_, isList := item.([]any)
 	return key == "arguments" && isList
-}
-
-func sortedKeys(object map[string]any) []string {
-	keys := make([]string, 0, len(object))
-	for key := range object {
-		keys = append(keys, key)
-	}
-	slices.Sort(keys)
-	return keys
 }
 
 // exemptValue reports whether a protocol value (or a list of them, such as

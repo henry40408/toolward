@@ -69,8 +69,8 @@ func forward(ctx context.Context, req forwardRequest) (json.RawMessage, error) {
 	return masked, nil
 }
 
-// present is false for an absent key and for JSON null, which the Rust
-// version (typed Option fields) also treated as absent.
+// present is false for an absent key and for JSON null, which earlier
+// builds (typed optional fields) also treated as absent.
 func present(value json.RawMessage) bool {
 	return value != nil && string(value) != "null"
 }
@@ -86,7 +86,7 @@ func withResultType(result json.RawMessage) (json.RawMessage, error) {
 }
 
 // withContent returns result with "content":[] when it has none: the schema
-// requires the field, and the Rust version's typed result always wrote it.
+// requires the field, and earlier builds always wrote it.
 func withContent(result json.RawMessage) (json.RawMessage, error) {
 	if present(rawjson.Raw(result, "content")) {
 		return result, nil

@@ -4,7 +4,8 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"sort"
+	"maps"
+	"slices"
 	"strings"
 	"unicode"
 
@@ -58,7 +59,7 @@ func BuildCommand(spec StdioSpec, secretStore store.Store) (BuiltCommand, error)
 		}
 		built.Args = append(built.Args, expanded)
 	}
-	for _, key := range sortedKeys(spec.Env) {
+	for _, key := range slices.Sorted(maps.Keys(spec.Env)) {
 		expanded, err := expandInto(&built, spec.Env[key], secretStore)
 		if err != nil {
 			return BuiltCommand{}, err
@@ -72,15 +73,6 @@ func expandInto(built *BuiltCommand, input string, secretStore store.Store) (str
 	expanded, secrets, err := interpolate.ExpandCollecting(input, secretStore)
 	built.Secrets = append(built.Secrets, secrets...)
 	return expanded, err
-}
-
-func sortedKeys(values map[string]string) []string {
-	keys := make([]string, 0, len(values))
-	for key := range values {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	return keys
 }
 
 // Connect starts the child and completes the handshake.

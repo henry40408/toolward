@@ -35,7 +35,7 @@ func startWait(t *testing.T, state string) (*Callback, chan waitResult, context.
 // request sends raw bytes and returns the reply.
 func request(t *testing.T, callback *Callback, raw string) string {
 	t.Helper()
-	conn, err := net.Dial("tcp", net.JoinHostPort("127.0.0.1", itoa(callback.Port())))
+	conn, err := net.Dial("tcp", net.JoinHostPort("127.0.0.1", itoa(callback.port)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -52,7 +52,7 @@ func get(target string) string { return "GET " + target + " HTTP/1.1\r\nHost: x\
 func TestRedirectURIUsesTheLoopbackAddress(t *testing.T) {
 	callback, _, cancel := startWait(t, "s")
 	defer cancel()
-	want := "http://127.0.0.1:" + itoa(callback.Port()) + "/callback"
+	want := "http://127.0.0.1:" + itoa(callback.port) + "/callback"
 	if callback.RedirectURI() != want {
 		t.Fatalf("got %s", callback.RedirectURI())
 	}
@@ -116,7 +116,7 @@ func TestErrorCodesAreCleanedAndShortened(t *testing.T) {
 func TestAStalledConnectionDoesNotBlockTheNextOne(t *testing.T) {
 	callback, results, cancel := startWait(t, "s1")
 	defer cancel()
-	stalled, err := net.Dial("tcp", net.JoinHostPort("127.0.0.1", itoa(callback.Port())))
+	stalled, err := net.Dial("tcp", net.JoinHostPort("127.0.0.1", itoa(callback.port)))
 	if err != nil {
 		t.Fatal(err)
 	}

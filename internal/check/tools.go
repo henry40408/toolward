@@ -3,7 +3,7 @@ package check
 import (
 	"context"
 	"encoding/json"
-	"sort"
+	"slices"
 	"strings"
 	"unicode"
 
@@ -96,7 +96,7 @@ func capabilityNames(capabilities json.RawMessage) []string {
 	for key, value := range fields {
 		found = append(found, namesOfCapability(key, value)...)
 	}
-	sort.Strings(found)
+	slices.Sort(found)
 	return found
 }
 

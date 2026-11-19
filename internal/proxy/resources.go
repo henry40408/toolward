@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"strings"
 	"unicode/utf8"
 
@@ -40,39 +41,11 @@ func isUnreserved(b byte) bool {
 }
 
 func decodeURI(text string) (string, bool) {
-	out := make([]byte, 0, len(text))
-	for i := 0; i < len(text); i++ {
-		if text[i] != '%' {
-			out = append(out, text[i])
-			continue
-		}
-		if i+2 >= len(text) {
-			return "", false
-		}
-		high, okHigh := hexValue(text[i+1])
-		low, okLow := hexValue(text[i+2])
-		if !okHigh || !okLow {
-			return "", false
-		}
-		out = append(out, high<<4|low)
-		i += 2
-	}
-	if !utf8.Valid(out) {
+	decoded, err := url.PathUnescape(text)
+	if err != nil || !utf8.ValidString(decoded) {
 		return "", false
 	}
-	return string(out), true
-}
-
-func hexValue(c byte) (byte, bool) {
-	switch {
-	case c >= '0' && c <= '9':
-		return c - '0', true
-	case c >= 'a' && c <= 'f':
-		return c - 'a' + 10, true
-	case c >= 'A' && c <= 'F':
-		return c - 'A' + 10, true
-	}
-	return 0, false
+	return decoded, true
 }
 
 // exposeURI gives the URI the agent sees for an upstream URI.

@@ -21,7 +21,7 @@ const (
 type ClientRecord struct {
 	ClientID string `json:"client_id"`
 	// ClientSecret is nil for a public client. It is written as null then, as
-	// the Rust version did.
+	// earlier builds did.
 	ClientSecret *string `json:"client_secret"`
 }
 

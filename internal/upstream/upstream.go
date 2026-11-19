@@ -130,7 +130,7 @@ func (u *Upstream) release() {
 	<-u.gate
 }
 
-// seconds renders a duration like Rust's f32 seconds: "10", "1.5".
+// seconds renders a duration as 32-bit float seconds: "10", "1.5".
 func seconds(d time.Duration) string {
 	return strconv.FormatFloat(d.Seconds(), 'f', -1, 32)
 }

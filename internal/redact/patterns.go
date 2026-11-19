@@ -68,7 +68,7 @@ func jsonForms(secret string) []string {
 	}
 }
 
-// jsonEscape escapes s as the inside of a JSON string, like serde_json: only
+// jsonEscape escapes s as the inside of a JSON string: only
 // quotes, backslashes and control characters change. Unlike encoding/json it
 // leaves <, > and & alone.
 func jsonEscape(s string) string {
