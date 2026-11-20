@@ -8,8 +8,7 @@ import (
 	"github.com/tailscale/hujson"
 )
 
-// object is a JSON object. Encoding sorts its keys, as serde_json does without
-// its preserve_order feature.
+// object is a JSON object. Encoding sorts its keys.
 type object = map[string]any
 
 // parseDocument reads JSONC. Numbers stay as written (json.Number). Text that

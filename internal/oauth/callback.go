@@ -49,9 +49,6 @@ func ListenCallback(port uint16) (*Callback, error) {
 // Close stops listening.
 func (c *Callback) Close() error { return c.listener.Close() }
 
-// Port is the port the server listens on.
-func (c *Callback) Port() int { return c.port }
-
 // RedirectURI is the redirect URI to register and to send.
 func (c *Callback) RedirectURI() string {
 	return fmt.Sprintf("http://%s:%d%s", callbackLoopbackIP, c.port, callbackPath)

@@ -6,7 +6,8 @@
 package check
 
 import (
-	"sort"
+	"maps"
+	"slices"
 
 	"github.com/henry40408/toolward/internal/config"
 	"github.com/henry40408/toolward/internal/oauth"
@@ -95,31 +96,19 @@ func (r *ServerReport) OK() bool {
 
 // AllOK says whether every server is ok.
 func AllOK(reports []*ServerReport) bool {
-	for _, report := range reports {
-		if !report.OK() {
-			return false
-		}
-	}
-	return true
+	return !slices.ContainsFunc(reports, func(report *ServerReport) bool { return !report.OK() })
 }
 
 // CheckSecrets checks that every referenced secret and OAuth login is in the
 // store. It never reads a secret value into the report.
 func CheckSecrets(cfg *config.Config, secrets store.Store) []*ServerReport {
 	references := cfg.References()
-	servers := make([]string, 0, len(references))
-	for server := range references {
-		servers = append(servers, server)
-	}
-	sort.Strings(servers)
-	oauthServers := map[string]bool{}
-	for _, name := range cfg.OAuthServers() {
-		oauthServers[name] = true
-	}
+	servers := slices.Sorted(maps.Keys(references))
+	oauthServers := cfg.OAuthServers()
 	reports := make([]*ServerReport, 0, len(servers))
 	for _, server := range servers {
 		report := newServerReport(server)
-		if oauthServers[server] {
+		if slices.Contains(oauthServers, server) {
 			report.OAuth = oauthReport(secrets, server)
 		}
 		for _, account := range references[server] {

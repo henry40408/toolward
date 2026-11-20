@@ -8,7 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"sort"
+	"slices"
 	"sync"
 
 	"github.com/henry40408/toolward/internal/config"
@@ -50,7 +50,7 @@ func New(options Options) *Proxy {
 		proxy.upstreams[u.Name()] = u
 		proxy.names = append(proxy.names, u.Name())
 	}
-	sort.Strings(proxy.names)
+	slices.Sort(proxy.names)
 	return proxy
 }
 
@@ -125,11 +125,7 @@ func (p *Proxy) Upstreams() []*upstream.Upstream {
 func (p *Proxy) Shutdown() {
 	var group sync.WaitGroup
 	for _, u := range p.upstreams {
-		group.Add(1)
-		go func() {
-			defer group.Done()
-			u.Shutdown()
-		}()
+		group.Go(u.Shutdown)
 	}
 	group.Wait()
 }

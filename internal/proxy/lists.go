@@ -1,10 +1,12 @@
 package proxy
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
-	"sort"
+	"slices"
+	"sync"
 
 	"github.com/henry40408/toolward/internal/cache"
 	"github.com/henry40408/toolward/internal/mcpwire"
@@ -76,16 +78,13 @@ func (p *Proxy) listResourceTemplates() (json.RawMessage, error) {
 // must not keep it.
 func (p *Proxy) merge(ctx context.Context, spec listing) (json.RawMessage, error) {
 	results := make([]fetched, len(p.names))
-	done := make(chan struct{}, len(p.names))
+	var group sync.WaitGroup
 	for i, name := range p.names {
-		go func() {
-			defer func() { done <- struct{}{} }()
+		group.Go(func() {
 			results[i] = p.fetchFrom(ctx, p.upstreams[name], spec)
-		}()
+		})
 	}
-	for range p.names {
-		<-done
-	}
+	group.Wait()
 	return p.combine(spec, results)
 }
 
@@ -102,7 +101,7 @@ func (p *Proxy) combine(spec listing, results []fetched) (json.RawMessage, error
 		entries = append(entries, more...)
 		hints = append(hints, resultHints...)
 	}
-	sort.SliceStable(entries, func(a, b int) bool { return entries[a].key < entries[b].key })
+	slices.SortStableFunc(entries, func(a, b listEntry) int { return cmp.Compare(a.key, b.key) })
 	items := make([]json.RawMessage, 0, len(entries))
 	for _, e := range entries {
 		items = append(items, e.item)
