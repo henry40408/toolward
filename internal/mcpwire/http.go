@@ -144,11 +144,7 @@ func (t *HTTPTransport) runInBackground(work func()) bool {
 	if t.closed {
 		return false
 	}
-	t.background.Add(1)
-	go func() {
-		defer t.background.Done()
-		work()
-	}()
+	t.background.Go(work)
 	return true
 }
 
