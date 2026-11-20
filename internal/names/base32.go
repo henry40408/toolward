@@ -13,8 +13,9 @@ func base32Prefix(digest []byte, n int) string {
 	// digest bits; names have never included it, so cap n at the complete ones.
 	// n == 0 has always meant "no limit".
 	complete := len(digest) * 8 / 5
-	if n == 0 || n > complete {
+	if n == 0 {
 		n = complete
 	}
+	n = min(n, complete)
 	return lowerBase32.EncodeToString(digest)[:n]
 }
